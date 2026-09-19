@@ -23,6 +23,7 @@
 
 (function () {
     'use strict';
+    // --- auto-update pipeline test marker (2026-09-19) ---
 
     /* ============================================================
        CONFIG
