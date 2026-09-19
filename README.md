@@ -4,17 +4,38 @@ A Tampermonkey userscript for Helm / Outbound labor planning. It intercepts the
 `HoudiniPickCapacity` API and renders a panel with Daily Totals, Pick Ahead By
 Zone, and an Outbound Labor Plan.
 
-## Install (one time)
+## Install (2 minutes, one time)
 
-You need the [Tampermonkey](https://www.tampermonkey.net/) browser extension.
+Once you install from the link below, the script **updates itself
+automatically** — you never reinstall.
 
-Click the raw link below — Tampermonkey will detect the `.user.js` file and
-prompt you to install:
+**Step 1 — Get Tampermonkey (skip if you have it).** Install the
+[Tampermonkey](https://www.tampermonkey.net/) browser extension from your
+browser's extension store (Chrome Web Store / Edge Add-ons / Firefox Add-ons).
+
+**Step 2 — Install the script.** Click this link (or paste it into your address
+bar):
 
 **https://raw.githubusercontent.com/gabrerut/outbound-labor-pilot/main/outbound-labor-pilot.user.js**
 
-That's it. After installing once, you never have to reinstall — updates arrive
-automatically (see below).
+Tampermonkey opens an install screen. Confirm it says **Outbound Labor Pilot**
+at the top, then click the green **Install** button.
+
+> If the page just shows a wall of code instead of an install screen,
+> Tampermonkey isn't installed yet — go back to Step 1.
+
+**Step 3 — Use it.** Open Helm and go to a pick-capacity page. The panel appears
+top-right. Drag it, minimize it, or switch tabs (Daily Totals / Pick Ahead By
+Zone / Outbound Labor Plan). Click the gear icon to set site rates and CPTs.
+
+### Trouble?
+
+- **Link won't load / "can't reach site":** your network may block GitHub raw.
+  Contact the maintainer — it can be hosted internally instead.
+- **Panel doesn't show:** confirm you're on a Helm pick-capacity page and the
+  script is toggled **on** in the Tampermonkey dashboard.
+
+That's it. Updates arrive automatically (see below).
 
 ## How auto-update works
 
