@@ -977,7 +977,7 @@
         const fmtRow = (label, val, div, src2) => `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 2px;border-bottom:1px solid ${C.border};">
             <span style="flex:1;min-width:0;line-height:1.2;"><span style="color:${C.txt};font-size:13.5px;font-weight:600;">${label}</span>
                 <span style="display:block;color:${C.mut};font-size:11.5px;margin-top:1px;">\u00f7${div} \u00b7 ${src2}</span></span>
-            <span style="flex:none;width:56px;font-weight:800;color:${C.head};font-size:19px;line-height:1;letter-spacing:-.3px;text-align:right;font-variant-numeric:tabular-nums;">${val}</span></div>`;
+            <span style="flex:none;min-width:56px;padding-left:10px;font-weight:800;color:${C.head};font-size:19px;line-height:1;letter-spacing:-.3px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;">${val}</span></div>`;
         let card = `<div style="border:1px solid ${C.border};border-top:none;border-radius:0 0 6px 6px;margin-bottom:10px;overflow:hidden;">`;
         card += `<div style="padding:8px 12px;">`;
         // PICK VOLUME (v29.2): AUTO-FILLED from Labor Allocation (current hr), click-to-edit override.
@@ -1019,13 +1019,13 @@
         card += `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 2px;border-bottom:1px solid ${C.border};">
             <span style="flex:1;min-width:0;line-height:1.2;"><span style="color:${C.txt};font-size:13.5px;font-weight:600;">Outbound Support (Indirect)</span>
                 <span style="display:block;color:${C.mut};font-size:11.5px;margin-top:1px;">hours \u00b7 problem solve, etc</span></span>
-            <span style="flex:none;width:56px;font-weight:800;color:${C.head};font-size:19px;line-height:1;letter-spacing:-.3px;text-align:right;font-variant-numeric:tabular-nums;">${obSupportHrs()}</span></div>`;
+            <span style="flex:none;min-width:56px;padding-left:10px;font-weight:800;color:${C.head};font-size:19px;line-height:1;letter-spacing:-.3px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;">${obSupportHrs()}</span></div>`;
         // ---- TOTAL OUTBOUND LABOR: prominent tinted band, big number (batch + pick + support). ----
         const pickHrs = pickVol > 0 ? (pickPlan.pickers + pickPlan.stage + pickPlan.handoff + pickPlan.slam) : 0;
         const totalOutHrs = batchPlan.batching + pickHrs + obSupportHrs();
         card += `<div style="display:flex;justify-content:space-between;align-items:center;background:${C.head};color:#fff;border-radius:5px;padding:9px 2px 9px 12px;margin-top:8px;">
             <span style="flex:1;min-width:0;font-size:12.5px;font-weight:bold;letter-spacing:.2px;">Total Outbound Labor Hours <span style="opacity:.7;font-size:10px;font-weight:normal;">Needed</span></span>
-            <span style="flex:none;width:56px;font-size:22px;font-weight:800;line-height:1;letter-spacing:-.5px;text-align:right;font-variant-numeric:tabular-nums;">${totalOutHrs.toLocaleString()}</span></div>`;
+            <span style="flex:none;min-width:56px;padding-left:10px;font-size:22px;font-weight:800;line-height:1;letter-spacing:-.5px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;">${totalOutHrs.toLocaleString()}</span></div>`;
         card += `</div></div>`;
         return card;
     }
@@ -1367,14 +1367,14 @@
                         card += `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid ${C.border};font-variant-numeric:tabular-nums;">
                             <span style="line-height:1.2;"><span style="color:${C.txt};font-size:13.5px;font-weight:600;">${r.z}</span>
                                 <span style="display:block;color:${C.mut};font-size:10px;margin-top:0px;">picked ${r.picked.toLocaleString()} \u00b7 ${r.pct}% \u00b7 ${r.pickers} picker${r.pickers===1?'':'s'}</span></span>
-                            <span style="font-weight:800;color:${unpColor};font-size:19px;line-height:1;letter-spacing:-.3px;flex:none;width:56px;text-align:right;font-variant-numeric:tabular-nums;">${r.unp.toLocaleString()}</span></div>`;
+                            <span style="font-weight:800;color:${unpColor};font-size:19px;line-height:1;letter-spacing:-.3px;flex:none;min-width:56px;padding-left:10px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;">${r.unp.toLocaleString()}</span></div>`;
                     });
                     card += `</div>`;
                     // TOTAL — prominent navy band with the big unpicked number (matches labor plan total).
                     card += `<div style="display:flex;justify-content:space-between;align-items:center;background:${C.head};color:#fff;padding:8px 12px;font-variant-numeric:tabular-nums;">
                         <span style="line-height:1.2;"><span style="font-size:12.5px;font-weight:bold;letter-spacing:.2px;">TOTAL UNPICKED</span>
                             <span style="display:block;opacity:.7;font-size:10px;margin-top:1px;">picked ${totPickedZ.toLocaleString()} \u00b7 ${totPct}% \u00b7 ${totPickers} pickers</span></span>
-                        <span style="font-size:22px;font-weight:800;line-height:1;letter-spacing:-.5px;flex:none;width:56px;text-align:right;font-variant-numeric:tabular-nums;">${totUnp.toLocaleString()}</span></div>`;
+                        <span style="font-size:22px;font-weight:800;line-height:1;letter-spacing:-.5px;flex:none;min-width:56px;padding-left:10px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;">${totUnp.toLocaleString()}</span></div>`;
                     // REMAINING CAP footer
                     card += `<div style="display:flex;justify-content:space-between;font-size:11px;color:${C.mut};padding:6px 10px;border-top:1px solid ${C.border};">
                         <span>Total Remaining Capacity</span><span style="font-weight:bold;color:${C.head};">${totRemCap.toLocaleString()}</span></div>`;
