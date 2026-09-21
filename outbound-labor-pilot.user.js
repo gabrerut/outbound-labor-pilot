@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Outbound Labor Pilot - Labor Plan / Pick Ahead By Zone / Daily Totals (API)
 // @namespace    http://tampermonkey.net/
-// @version      1.18
+// @version      1.19
 // @description  Intercepts HoudiniPickCapacity API. Two tabs: Full Day Totals (all days with sold units) + Pick Ahead By Zone. Shift window now INCLUDES the anchor CPT (nights 09:15 / days 19:15); zone is DONE only when its anchor-window remaining is 0. OB Indirect splits BATCH vol (Helm) from PICK vol AUTO-PULLED from Labor Allocation get_active_plans (full 24hr array cached, resolves current hr live, cross-domain via GM storage) with manual override. Batching-done end state. Free-resize panel. Unpicked Summary shows picked + remaining cap + pick-ahead flag (Days>2 / Nights>3). Minimizable, Nights/Days toggle.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
@@ -1147,9 +1147,6 @@
                         <span style="font-size:10px;color:${C.mut};">Shift End</span>
                         <input type="text" data-shift-anchor="${key}" value="${anchorCptFor(key)}" style="width:56px;font-size:12px;padding:3px 5px;border:1px solid ${C.border};border-radius:4px;text-align:center;"></div>`;
                 });
-                // Pick-ahead note — strong, italic, directly under the Days/Nights window editors.
-                h += `<div style="font-size:10px;color:#8a5200;font-style:italic;font-weight:bold;background:#fff4e5;border-left:3px solid #e0a030;padding:6px 8px;margin:6px 0 4px;border-radius:3px;line-height:1.4;">
-                    All picked units count toward total picked (overlap/hand-off included). The pick-ahead flag only fires when units are picked <u>&gt;3 windows past the current hour's window</u> — counted by real CPTs, so the Nights delivery gap (22:15→02:15) never false-flags.</div>`;
                 } // end rate tab
                 if (settingsTab === 'obind') {
                     // OB Indirect divisors
