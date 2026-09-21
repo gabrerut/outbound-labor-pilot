@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Outbound Labor Pilot - Labor Plan / Pick Ahead By Zone / Daily Totals (API)
 // @namespace    http://tampermonkey.net/
-// @version      1.14
+// @version      1.15
 // @description  Intercepts HoudiniPickCapacity API. Two tabs: Full Day Totals (all days with sold units) + Pick Ahead By Zone. Shift window now INCLUDES the anchor CPT (nights 09:15 / days 19:15); zone is DONE only when its anchor-window remaining is 0. OB Indirect splits BATCH vol (Helm) from PICK vol AUTO-PULLED from Labor Allocation get_active_plans (full 24hr array cached, resolves current hr live, cross-domain via GM storage) with manual override. Batching-done end state. Free-resize panel. Unpicked Summary shows picked + remaining cap + pick-ahead flag (Days>2 / Nights>3). Minimizable, Nights/Days toggle.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
@@ -766,43 +766,14 @@
         let effEnd = wEnd;
         let daysRolled = false;
         let rolledDate = null;   // the next-day date we rolled into (for the banner)
-        // First pass: this shift's own windows.
-        let ownRows = rows.filter(r => !isNaN(r.ms) && r.ms >= wStart && r.ms < wEnd);
-        if (currentShift === 'days') {
-            // TRIGGER: roll when the Days PRIMARY/anchor CPT (20:15) is fully picked — not when
-            // every window is zero. Once 20:15 is clear, Days' board is considered complete and
-            // we roll forward into the next windows.
-            const anchorCpt = ANCHOR_CPT.days;   // '20:15'
-            const anchorRows = ownRows.filter(r => r.cpt === anchorCpt);
-            const anchorVolume = anchorRows.reduce((a, r) =>
-                a + ZONES.reduce((b, z) => b + r.zones[z].o, 0), 0);
-            const anchorUnpicked = anchorRows.reduce((a, r) =>
-                a + ZONES.reduce((b, z) => b + Math.max(r.zones[z].o - r.zones[z].p, 0), 0), 0);
-            // ROLL INTO NEXT DAY (v27.4): when 20:15 is fully picked, show the NEXT DAY's Days windows
-            // (07:15 -> 20:15), capped +1 day. Next-day windows aren't in the API (current-day only),
-            // so we merge SCRAPED next-day zone rows from the Helm table. Falls back to current-day
-            // 'DONE' view if the scrape returns nothing (safe).
-            if (anchorVolume > 0 && anchorUnpicked === 0) {
-                const nd = scrapeNextDayZoneRows();
-                // Next day's Days window = the calendar day AFTER this Days SOS date, 07:00 -> 20:16.
-                const sosStr = etDate(wStart);
-                const [sy, sm, sd] = sosStr.split('-').map(Number);
-                const nextDayStr = etDate(cptMs(sosStr, '12:00') + 24*3600000);   // +1 day, ET-safe
-                const dStartH = startHour('days'), dAnchorH = anchorHour('days');
-                // Keep only scraped rows on the next calendar day within Days' own CPT band.
-                const ndDays = nd.filter(r => r.date === nextDayStr
-                    && r.hr >= dStartH && r.hr <= dAnchorH);
-                if (ndDays.length) {
-                    // Merge scraped next-day rows into the working set; re-scope window to next-day Days.
-                    rows = rows.concat(ndDays);
-                    const ms0 = Math.min(...ndDays.map(r => r.ms));
-                    const ms1 = Math.max(...ndDays.map(r => r.ms)) + 60000;
-                    wStart = ms0; effEnd = ms1;
-                    daysRolled = true;
-                    rolledDate = nextDayStr;
-                }
-            }
-        }
+        // NEXT-DAY ROLL DISABLED (v1.15): Days always shows the CURRENT calendar day's windows
+        // (07:15 -> 20:15), never rolling forward. The old roll fired once 20:15 was fully picked,
+        // scraped the next day's Helm table, and merged it in — but the API/DOM already carry the
+        // next day once the picker spans it, so the merge DOUBLE-COUNTED every window (Ambient
+        // 154k/84k = 181.8%, inflated total). Per operator rule: at 9:49PM on 9/20 the Days board
+        // must show 9/20's windows whether the calendar is set to 9/20 or 9/21. So Days = current
+        // real-clock calendar day, full stop. (daysRolled stays false; effEnd stays = wEnd.)
+        // scrapeNextDayZoneRows() + the daysRolled render banner are now dormant, left in place.
         let shiftRows = rows
             .filter(r => !isNaN(r.ms) && r.ms >= wStart && r.ms < effEnd)
             .sort((a, b) => a.ms - b.ms);
