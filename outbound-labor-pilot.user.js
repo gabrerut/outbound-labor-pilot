@@ -27,10 +27,11 @@
     /* ============================================================
        CONFIG
        ============================================================ */
-    const ZONES = ['Chilled', 'Ambient', 'Frozen', 'Bigs']; // display order (by typical volume)
+    const ZONES = ['Chilled', 'Ambient', 'Frozen', 'Bigs', 'Hv Bigs']; // display order (by typical volume)
     const ZONE_FIELD = {
         'Ambient': 'ambient',
         'Bigs':    'bigs',
+        'Hv Bigs': 'hv_bigs',
         'Frozen':  'frozen',
         'Chilled': 'chilled',
     };
@@ -45,7 +46,7 @@
     // ============================================================
     const SETTINGS_DEFAULTS = {
         // Planned pack rate (UPH) per zone — drives 'pickers needed'.
-        rates: { 'Chilled': 105, 'Ambient': 105, 'Frozen': 90, 'Bigs': 105 },
+        rates: { 'Chilled': 105, 'Ambient': 105, 'Frozen': 90, 'Bigs': 105, 'Hv Bigs': 105 },
         // Shift PRIMARY windows: first pick CPT (start) and anchor CPT (last pick) per shift.
         // Times are 'HH:15' CPT labels. The anchor CPT is also the shift-completion gate.
         shifts: {
@@ -729,13 +730,12 @@
                 if (!zcells) continue;
                 // Zone blocks: skip leading summary cells. Find the first numeric run — the confirmed
                 // layout has 6 summary columns before Ambient's Units Ordered. Use offset 6.
-                // Each zone = 4 cells [Ordered, Picked, UPH, Labor]; order Ambient,Bigs,HvBigs,Frozen,Chilled.
+                // Each zone = 4 cells [Ordered, Picked, UPH, Labor]; order Ambient,Bigs,Hv Bigs,Frozen,Chilled.
                 const ZBASE = 6;
-                const TABLE_ZONE_ORDER = ['Ambient','Bigs','HvBigs','Frozen','Chilled'];
+                const TABLE_ZONE_ORDER = ['Ambient','Bigs','Hv Bigs','Frozen','Chilled'];
                 const zones = {}; ZONES.forEach(z => zones[z] = { o:0, p:0 });
                 let wo=0, wp=0, ok=false;
                 TABLE_ZONE_ORDER.forEach((zoneName, zi) => {
-                    if (zoneName === 'HvBigs') return;               // not in zone view
                     const oCell = zcells[ZBASE + zi*4];
                     const pCell = zcells[ZBASE + zi*4 + 1];
                     if (!oCell || !zones[zoneName]) return;
