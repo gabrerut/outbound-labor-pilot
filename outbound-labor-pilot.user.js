@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Outbound Labor Pilot - Labor Plan / Pick Ahead By Zone / Daily Totals (API)
 // @namespace    http://tampermonkey.net/
-// @version      1.16
+// @version      1.17
 // @description  Intercepts HoudiniPickCapacity API. Two tabs: Full Day Totals (all days with sold units) + Pick Ahead By Zone. Shift window now INCLUDES the anchor CPT (nights 09:15 / days 19:15); zone is DONE only when its anchor-window remaining is 0. OB Indirect splits BATCH vol (Helm) from PICK vol AUTO-PULLED from Labor Allocation get_active_plans (full 24hr array cached, resolves current hr live, cross-domain via GM storage) with manual override. Batching-done end state. Free-resize panel. Unpicked Summary shows picked + remaining cap + pick-ahead flag (Days>2 / Nights>3). Minimizable, Nights/Days toggle.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
@@ -35,7 +35,7 @@
         'Frozen':  'frozen',
         'Chilled': 'chilled',
     };
-    const MAX_DAYS = 3; // Full Day Totals shows up to 3 days (matches current Mega Helm)
+    const MAX_DAYS = 4; // Daily Totals shows up to 4 days (9/20+9/21+9/22 and headroom). Pick Ahead roll is UNAFFECTED — it stays single-day (9/21 only).
     const MAX_ZONE_WINDOWS = 5;  // Pick Ahead By Zone: show at most 5 current windows per zone
     const PICK_AHEAD_LIMIT  = 3; // flag picks landing more than 3 windows ahead of the earliest unfinished one
     const DEBUG = false;          // show a diagnostic readout of every date/count in the store
@@ -766,14 +766,40 @@
         let effEnd = wEnd;
         let daysRolled = false;
         let rolledDate = null;   // the next-day date we rolled into (for the banner)
-        // NEXT-DAY ROLL DISABLED (v1.15): Days always shows the CURRENT calendar day's windows
-        // (07:15 -> 20:15), never rolling forward. The old roll fired once 20:15 was fully picked,
-        // scraped the next day's Helm table, and merged it in — but the API/DOM already carry the
-        // next day once the picker spans it, so the merge DOUBLE-COUNTED every window (Ambient
-        // 154k/84k = 181.8%, inflated total). Per operator rule: at 9:49PM on 9/20 the Days board
-        // must show 9/20's windows whether the calendar is set to 9/20 or 9/21. So Days = current
-        // real-clock calendar day, full stop. (daysRolled stays false; effEnd stays = wEnd.)
-        // scrapeNextDayZoneRows() + the daysRolled render banner are now dormant, left in place.
+        // First pass: this shift's own windows.
+        let ownRows = rows.filter(r => !isNaN(r.ms) && r.ms >= wStart && r.ms < wEnd);
+        // DAYS NEXT-DAY ROLL (restored v1.16): once 9/20's Days windows are FULLY PICKED, show
+        // 9/21's Days windows — no matter what day the Helm picker is set to. The prior double-count
+        // bug was NOT the roll itself; it was concatenating scraped next-day rows ON TOP of API/DOM
+        // rows that already existed for that day (ordered volume ~2x). Fix: DEDUPE by date+cpt so
+        // scraped rows REPLACE, never add.
+        if (currentShift === 'days') {
+            const anchorCpt = ANCHOR_CPT.days;   // '20:15'
+            const anchorRows = ownRows.filter(r => r.cpt === anchorCpt);
+            const anchorVolume = anchorRows.reduce((a, r) =>
+                a + ZONES.reduce((b, z) => b + r.zones[z].o, 0), 0);
+            const anchorUnpicked = anchorRows.reduce((a, r) =>
+                a + ZONES.reduce((b, z) => b + Math.max(r.zones[z].o - r.zones[z].p, 0), 0), 0);
+            // Roll trigger: 20:15 has sold volume AND is fully picked -> current Days board is complete.
+            if (anchorVolume > 0 && anchorUnpicked === 0) {
+                const nd = scrapeNextDayZoneRows();
+                const sosStr = etDate(wStart);
+                const nextDayStr = etDate(cptMs(sosStr, '12:00') + 24*3600000);   // +1 day, ET-safe
+                const dStartH = startHour('days'), dAnchorH = anchorHour('days');
+                const ndDays = nd.filter(r => r.date === nextDayStr && r.hr >= dStartH && r.hr <= dAnchorH);
+                if (ndDays.length) {
+                    // DEDUPE FIX: drop any existing rows whose date+cpt matches a scraped next-day row
+                    // BEFORE concat, so scraped next-day rows REPLACE (never double) the API/DOM copies.
+                    const ndKeys = new Set(ndDays.map(r => (r.date || r.day) + '|' + r.cpt));
+                    rows = rows.filter(r => !ndKeys.has((r.date || r.day) + '|' + r.cpt)).concat(ndDays);
+                    const ms0 = Math.min(...ndDays.map(r => r.ms));
+                    const ms1 = Math.max(...ndDays.map(r => r.ms)) + 60000;
+                    wStart = ms0; effEnd = ms1;
+                    daysRolled = true;
+                    rolledDate = nextDayStr;
+                }
+            }
+        }
         let shiftRows = rows
             .filter(r => !isNaN(r.ms) && r.ms >= wStart && r.ms < effEnd)
             .sort((a, b) => a.ms - b.ms);
