@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Outbound Labor Pilot - Labor Plan / Pick Ahead By Zone / Daily Totals (API)
 // @namespace    http://tampermonkey.net/
-// @version      1.13
+// @version      1.14
 // @description  Intercepts HoudiniPickCapacity API. Two tabs: Full Day Totals (all days with sold units) + Pick Ahead By Zone. Shift window now INCLUDES the anchor CPT (nights 09:15 / days 19:15); zone is DONE only when its anchor-window remaining is 0. OB Indirect splits BATCH vol (Helm) from PICK vol AUTO-PULLED from Labor Allocation get_active_plans (full 24hr array cached, resolves current hr live, cross-domain via GM storage) with manual override. Batching-done end state. Free-resize panel. Unpicked Summary shows picked + remaining cap + pick-ahead flag (Days>2 / Nights>3). Minimizable, Nights/Days toggle.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
