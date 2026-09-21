@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Outbound Labor Pilot - Labor Plan / Pick Ahead By Zone / Daily Totals (API)
 // @namespace    http://tampermonkey.net/
-// @version      1.20
+// @version      1.21
 // @description  Intercepts HoudiniPickCapacity API. Two tabs: Full Day Totals (all days with sold units) + Pick Ahead By Zone. Shift window now INCLUDES the anchor CPT (nights 09:15 / days 19:15); zone is DONE only when its anchor-window remaining is 0. OB Indirect splits BATCH vol (Helm) from PICK vol AUTO-PULLED from Labor Allocation get_active_plans (full 24hr array cached, resolves current hr live, cross-domain via GM storage) with manual override. Batching-done end state. Free-resize panel. Unpicked Summary shows picked + remaining cap + pick-ahead flag (Days>2 / Nights>3). Minimizable, Nights/Days toggle.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
@@ -1156,10 +1156,9 @@
                             <span style="font-size:12px;color:${C.txt};">${label}</span>
                             <input type="text" inputmode="numeric" pattern="[0-9]*" data-obdiv="${k}" value="${obDiv(k)}" style="width:70px;font-size:12px;padding:3px 6px;border:1px solid ${C.border};border-radius:4px;text-align:right;"></div>`;
                     });
-                    // Outbound Indirect Support (hours) — its own OB Indirect setting (v29.20)
-                    h += `<div style="font-size:11px;font-weight:bold;color:${C.mut};margin:10px 0 4px;">Outbound Support (Indirect)</div>`;
+                    // Outbound Indirect Support (hours) — single inline row (no section header).
                     h += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                        <span style="font-size:12px;color:${C.txt};">Support (hrs)</span>
+                        <span style="font-size:12px;color:${C.txt};">Outbound Support (hrs)</span>
                         <input type="text" inputmode="decimal" data-obsupport="1" value="${obSupportHrs()}" style="width:70px;font-size:12px;padding:3px 6px;border:1px solid ${C.border};border-radius:4px;text-align:right;"></div>`;
                     // Batch schedule CPTs
                     h += `<div style="font-size:11px;font-weight:bold;color:${C.mut};margin:10px 0 4px;">Batch Window (CPTs)</div>`;
