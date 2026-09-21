@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Outbound Labor Pilot - Labor Plan / Pick Ahead By Zone / Daily Totals (API)
 // @namespace    http://tampermonkey.net/
-// @version      1.22
+// @version      1.27
 // @description  Intercepts HoudiniPickCapacity API. Two tabs: Full Day Totals (all days with sold units) + Pick Ahead By Zone. Shift window now INCLUDES the anchor CPT (nights 09:15 / days 19:15); zone is DONE only when its anchor-window remaining is 0. OB Indirect splits BATCH vol (Helm) from PICK vol AUTO-PULLED from Labor Allocation get_active_plans (full 24hr array cached, resolves current hr live, cross-domain via GM storage) with manual override. Batching-done end state. Free-resize panel. Unpicked Summary shows picked + remaining cap + pick-ahead flag (Days>2 / Nights>3). Minimizable, Nights/Days toggle.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
@@ -266,6 +266,7 @@
     let settingsOpen = false;      // settings panel open/closed
     let summaryOpen = false;       // zone-summary snapshot open/closed
     let obindOpen = false;         // OB Indirect plan open/closed
+    let infoOpen = false;          // ℹ️ How-to / instructions overlay open/closed
     // MANUAL PICK VOLUME (v25.1): pick volume comes from the Labor Allocation page
     // (na.store-management.f3.amazon.dev/laborallocation, current hour) — NOT the Helm
     // batch API. Batch vol drives Batchers; this manual pick vol drives Pickers/Stage/Handoff/Slam.
@@ -800,6 +801,41 @@
                 }
             }
         }
+        // NIGHTS NEXT-SHIFT ROLL (v1.23): once this Nights shift's ANCHOR (09:15) is fully picked,
+        // roll forward to TONIGHT's Nights windows (next SOS 19:15 -> following-day 09:15). Example:
+        // at ~9AM Mon 9/21, once 9/21 09:15 is picked -> show 9/21 19:15 through 9/22 09:15. The Helm
+        // table carries 3 days of windows, so tonight's board is always present in the scrape. Mirrors
+        // the Days roll: DEDUPE by date+cpt (replace, never add), re-scope the window.
+        if (currentShift === 'nights') {
+            const anchorCpt = ANCHOR_CPT.nights;   // '09:15'
+            const anchorRows = ownRows.filter(r => r.cpt === anchorCpt);
+            const anchorVolume = anchorRows.reduce((a, r) =>
+                a + ZONES.reduce((b, z) => b + r.zones[z].o, 0), 0);
+            const anchorUnpicked = anchorRows.reduce((a, r) =>
+                a + ZONES.reduce((b, z) => b + Math.max(r.zones[z].o - r.zones[z].p, 0), 0), 0);
+            if (anchorVolume > 0 && anchorUnpicked === 0) {
+                const nd = scrapeNextDayZoneRows();
+                // Next Nights shift SOS = the evening AFTER this shift's SOS date. This shift's SOS is
+                // etDate(wStart) (the 19:15 date). Next SOS = +1 day; window = SOS 19:00 -> SOS+1 09:16.
+                const thisSos = etDate(wStart);
+                const nextSos = etDate(cptMs(thisSos, '12:00') + 24*3600000);      // +1 day
+                const nextEnd = etDate(cptMs(nextSos, '12:00') + 24*3600000);      // +2 days (morning tail)
+                const nStartH = startHour('nights'), nAnchorH = anchorHour('nights');
+                // Next Nights windows: evening CPTs (>= 19:15) on nextSos OR morning CPTs (<= 09:15) on nextEnd.
+                const ndNights = nd.filter(r =>
+                    (r.date === nextSos && r.hr >= nStartH) ||
+                    (r.date === nextEnd && r.hr <= nAnchorH));
+                if (ndNights.length) {
+                    const ndKeys = new Set(ndNights.map(r => (r.date || r.day) + '|' + r.cpt));
+                    rows = rows.filter(r => !ndKeys.has((r.date || r.day) + '|' + r.cpt)).concat(ndNights);
+                    const ms0 = Math.min(...ndNights.map(r => r.ms));
+                    const ms1 = Math.max(...ndNights.map(r => r.ms)) + 60000;
+                    wStart = ms0; effEnd = ms1;
+                    daysRolled = true;              // reuse the rolled flag for the banner
+                    rolledDate = nextSos;
+                }
+            }
+        }
         let shiftRows = rows
             .filter(r => !isNaN(r.ms) && r.ms >= wStart && r.ms < effEnd)
             .sort((a, b) => a.ms - b.ms);
@@ -1102,7 +1138,10 @@
         const leftBlock = minimized
             ? `<div style="font-size:12px;color:${C.headTxt};font-weight:bold;">${site + ' \u00b7 Helm'}</div>`
             : `<div style="display:flex;flex-direction:column;line-height:1.15;">
-                   <span style="font-size:11px;color:rgba(255,255,255,.9);font-weight:600;letter-spacing:.2px;">${site} \u00b7 Updated ${stamp} ET</span>
+                   <span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:rgba(255,255,255,.9);font-weight:600;letter-spacing:.2px;">
+                       ${site} \u00b7 Updated ${stamp} ET
+                       <span class="mh-tip mh-tip-left" data-tip="${infoOpen ? 'Close Help' : 'How To Use'}"><button id="mh-info" style="background:${infoOpen ? 'rgba(255,255,255,.25)' : 'transparent'};color:#fff;border:none;border-radius:5px;font-size:13px;line-height:1;padding:1px 4px;cursor:pointer;opacity:${infoOpen ? '1' : '.8'};">\u2139\ufe0f</button></span>
+                   </span>
                    <span style="font-size:7.5px;color:rgba(255,255,255,.4);font-weight:normal;white-space:nowrap;letter-spacing:.2px;">Created by gabrerut</span>
                </div>`;
         // Header icon buttons — crisper gear (emoji variation selector) + INSTANT custom tooltips
@@ -1119,11 +1158,50 @@
             </div>`;
 
         if (!minimized) {
+            // ---- ℹ️ HOW-TO / INSTRUCTIONS OVERLAY (v1.18) — click the ℹ️ button to open ----
+            if (infoOpen) {
+                const sec = (title) => `<div style="font-size:11px;font-weight:bold;color:${C.head};text-transform:uppercase;letter-spacing:.6px;margin:14px 0 5px;padding-bottom:3px;border-bottom:1px solid ${C.border};">${title}</div>`;
+                const tRow = (a, b) => `<tr><td style="padding:4px 8px 4px 0;font-weight:600;color:${C.txt};vertical-align:top;white-space:nowrap;">${a}</td><td style="padding:4px 0;color:${C.txt};">${b}</td></tr>`;
+                const tbl = (rowsHtml) => `<table style="width:100%;border-collapse:collapse;font-size:12px;line-height:1.45;">${rowsHtml}</table>`;
+                h += `<div style="padding:16px 16px 18px;background:${C.bg};border-bottom:1px solid ${C.border};font-size:12px;color:${C.txt};line-height:1.55;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                        <span style="font-size:15px;font-weight:bold;color:${C.txt};">\ud83d\udce6 How To Use Outbound Labor Pilot</span>
+                        <button id="mh-info-close" style="background:${C.head};color:#fff;border:none;border-radius:5px;font-size:11px;font-weight:bold;padding:5px 12px;cursor:pointer;">Close</button>
+                    </div>
+                    <div style="background:${C.card};border-left:3px solid ${C.head};border-radius:4px;padding:9px 11px;margin-bottom:4px;">
+                        <b>Why this exists:</b> An effective, efficient Outbound planning tool that pulls from our sources (WLM + Helm) in real time \u2014 surfacing <b>every CPT at once</b> so you can plan the full board ahead instead of reacting as windows roll in.
+                    </div>
+                    ${sec('The three tabs')}
+                    <div>\u2022 <b>Daily Totals</b> \u2014 units ordered / pickable / max capacity per day.</div>
+                    <div style="margin-top:4px;">\u2022 <b>Pick Ahead By Zone</b> \u2014 units sold + unpicked per temp zone (Chilled, Ambient, Frozen, Bigs, Hv Bigs) and pickers needed per zone, for balanced staffing and clean handoff. Tap the big <b>UNPICKED</b> number for the zone summary.</div>
+                    <div style="margin-top:4px;">\u2022 <b>Outbound Labor Plan</b> \u2014 full hourly plan: pickers per zone (direct) plus the OB Indirect planner (batchers, staging, handoff, slam + support). Tap <b>\ud83d\udce6 OUTBOUND LABOR PLAN</b> to open.</div>
+                    ${sec('Where the numbers come from')}
+                    ${tbl(
+                        tRow('Pick volume', 'WLM / Labor Allocation (STORM), current hour \u2014 sizes pickers, staging, handoff, slam.') +
+                        tRow('Batch volume', 'Helm \u2014 sizes batchers.')
+                    )}
+                    <div style="margin-top:4px;color:${C.mut};">Planned volume needs a tweak? Click the Pick Volume box to override; \u201cuse plan\u201d reverts it.</div>
+                    ${sec('Nights vs Days')}
+                    <div>Use the <b>Nights / Days</b> toggle to switch boards. The panel auto-anchors to the shift in progress. Once a shift picks through its anchor (Days 20:15 / Nights 09:15), it rolls forward to that shift\u2019s next set of windows.</div>
+                    ${sec('\u2699\ufe0f Make it your site (Settings)')}
+                    <div style="margin-bottom:6px;">Nothing is hardcoded \u2014 open the <b>\u2699\ufe0f gear</b> and set your site\u2019s values:</div>
+                    ${tbl(
+                        tRow('Pack Rate tab', 'Planned UPH per zone + Shift Windows (your Shift Start / Shift End CPTs for Nights &amp; Days).') +
+                        tRow('OB Indirect tab', 'Planning divisors (pick / batch / staging / handoff / slam), support hours, and batch window CPTs.')
+                    )}
+                    <div style="margin-top:6px;">Type your values \u2192 <b>Save</b>. Settings save to <i>your</i> browser, so <b>set them once</b>. <b>Reset defaults</b> restores UNJ2. Time zone auto-detects.</div>
+                    ${sec('Other controls')}
+                    <div>\u2022 \ud83d\udd0d zoom \u2014 clear snippets (Original / Larger / Largest)</div>
+                    <div style="margin-top:2px;">\u2022 \u2014 minimize to hide the panel</div>
+                    <div style="margin-top:2px;">\u2022 Drag the header to move it</div>
+                    <div style="margin-top:2px;">\u2022 Zone dropdown \u2014 isolate one zone or show all</div>
+                </div>`;
+            }
             // (Settings button moved into the header, left of the magnifier.)
             // ---- SETTINGS PANEL (rates + shift primary/anchor CPTs) ----
             if (settingsOpen) {
                 h += `<div style="padding:12px;background:${C.card};border-bottom:1px solid ${C.border};">`;
-                h += `<div style="font-size:13px;font-weight:bold;color:${C.txt};margin-bottom:8px;">\ud83d\udce6 Outbound Labor Plan</div>`;
+                h += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;"><span style="font-size:13px;font-weight:bold;color:${C.txt};">\ud83d\udce6 Outbound Labor Plan</span><button id="mh-set-close" style="background:${C.head};color:#fff;border:none;border-radius:5px;font-size:11px;font-weight:bold;padding:5px 12px;cursor:pointer;">Close</button></div>`;
                 // Sub-tabs: Pack Rate | OB Indirect
                 const setTab = (id,label) => `<button data-settab="${id}" style="flex:1;background:${settingsTab===id?C.head:C.card};color:${settingsTab===id?'#fff':C.txt};border:1px solid ${C.border};font-size:11px;font-weight:bold;padding:5px;cursor:pointer;">${label}</button>`;
                 h += `<div style="display:flex;gap:0;margin-bottom:10px;border-radius:5px;overflow:hidden;">${setTab('rate','Pack Rate')}${setTab('obind','OB Indirect')}</div>`;
@@ -1389,10 +1467,10 @@
                 }
                 // ---- PER-ZONE BARS: only on the Pick Ahead By Zone tab (v29.26) ----
                 if (activeTab === 'zone') {
-                // DAYS ROLLED banner: Days board is fully picked, now showing the incoming windows.
+                // ROLLED banner (v1.22): current shift's board is fully picked -> showing the next shift's windows.
                 if (daysRolled) {
                     h += `<div style="background:${C.greenBg};border:1px solid ${C.green};border-radius:5px;padding:7px 10px;margin-bottom:10px;font-size:12px;color:#1c6b3a;font-weight:bold;">
-                        ✓ Days 20:15 picked — showing NEXT DAY${rolledDate ? ' ' + rolledDate : ''} Days board (07:15→20:15)</div>`;
+                        ✓ ${currentShift === 'nights' ? 'Nights 09:15' : 'Days 20:15'} picked — showing NEXT ${currentShift === 'nights' ? 'NIGHTS' : 'DAY'}${rolledDate ? ' ' + rolledDate : ''} board (${SETTINGS.shifts[currentShift].start}→${SETTINGS.shifts[currentShift].anchor})</div>`;
                 }
                 // Zone filter DROPDOWN — collapses to one line; shows only the zones you care about.
                 const selLabel = visibleZones.length === ZONES.length ? 'All zones'
@@ -1489,7 +1567,10 @@
                 if (settab && panel.contains(settab)) { settingsTab = settab.getAttribute('data-settab'); render(); return; }
                 if (e.target.closest('#mh-obind-toggle')) { obindOpen = !obindOpen; render(); return; }
                 if (e.target.closest('#mh-summary-toggle')) { summaryOpen = !summaryOpen; render(); return; }
+                if (e.target.closest('#mh-info')) { infoOpen = !infoOpen; render(); return; }
+                if (e.target.closest('#mh-info-close')) { infoOpen = false; render(); return; }
                 if (e.target.closest('#mh-gear')) { settingsOpen = !settingsOpen; render(); return; }
+                if (e.target.closest('#mh-set-close')) { settingsOpen = false; render(); return; }
                 if (e.target.closest('#mh-size')) {
                     // Cycle zoom: Original(0) -> Larger(1) -> Largest(2) -> Original. Text scales each step.
                     panelZoomLevel = ((panelZoomLevel || 0) + 1) % 3;
