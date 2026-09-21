@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Outbound Labor Pilot - Labor Plan / Pick Ahead By Zone / Daily Totals (API)
 // @namespace    http://tampermonkey.net/
-// @version      1.28
+// @version      1.29
 // @description  Intercepts HoudiniPickCapacity API. Two tabs: Full Day Totals (all days with sold units) + Pick Ahead By Zone. Shift window now INCLUDES the anchor CPT (nights 09:15 / days 19:15); zone is DONE only when its anchor-window remaining is 0. OB Indirect splits BATCH vol (Helm) from PICK vol AUTO-PULLED from Labor Allocation get_active_plans (full 24hr array cached, resolves current hr live, cross-domain via GM storage) with manual override. Batching-done end state. Free-resize panel. Unpicked Summary shows picked + remaining cap + pick-ahead flag (Days>2 / Nights>3). Minimizable, Nights/Days toggle.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
@@ -1436,16 +1436,16 @@
                     rowsHtml.forEach((r) => {
                         const unpColor = r.unp > 0 ? C.red : C.green;
                         card += `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid ${C.border};font-variant-numeric:tabular-nums;">
-                            <span style="line-height:1.2;"><span style="color:${C.txt};font-size:13.5px;font-weight:600;">${r.z}</span>
+                            <span style="flex:1;min-width:0;line-height:1.2;"><span style="color:${C.txt};font-size:13.5px;font-weight:600;">${r.z}</span>
                                 <span style="display:block;color:${C.mut};font-size:10px;margin-top:0px;">picked ${r.picked.toLocaleString()} \u00b7 ${r.pct}% \u00b7 ${r.pickers} picker${r.pickers===1?'':'s'}</span></span>
                             <span style="font-weight:800;color:${unpColor};font-size:19px;line-height:1;letter-spacing:-.3px;flex:none;min-width:56px;padding-left:10px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;">${r.unp.toLocaleString()}</span></div>`;
                     });
                     card += `</div>`;
                     // TOTAL — prominent navy band with the big unpicked number (matches labor plan total).
                     card += `<div style="display:flex;justify-content:space-between;align-items:center;background:${C.head};color:#fff;padding:8px 12px;font-variant-numeric:tabular-nums;">
-                        <span style="line-height:1.2;"><span style="font-size:12.5px;font-weight:bold;letter-spacing:.2px;">TOTAL UNPICKED</span>
+                        <span style="flex:1;min-width:0;line-height:1.2;"><span style="font-size:12.5px;font-weight:bold;letter-spacing:.2px;">TOTAL UNPICKED</span>
                             <span style="display:block;opacity:.7;font-size:10px;margin-top:1px;">picked ${totPickedZ.toLocaleString()} \u00b7 ${totPct}% \u00b7 ${totPickers} pickers</span></span>
-                        <span style="font-size:22px;font-weight:800;line-height:1;letter-spacing:-.5px;flex:none;min-width:56px;padding-left:10px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;">${totUnp.toLocaleString()}</span></div>`;
+                        <span style="font-size:22px;font-weight:800;line-height:1;letter-spacing:-.5px;flex:none;min-width:56px;padding-left:12px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;">${totUnp.toLocaleString()}</span></div>`;
                     // REMAINING CAP footer
                     card += `<div style="display:flex;justify-content:space-between;font-size:11px;color:${C.mut};padding:6px 10px;border-top:1px solid ${C.border};">
                         <span>Total Remaining Capacity</span><span style="font-weight:bold;color:${C.head};">${totRemCap.toLocaleString()}</span></div>`;
