@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Outbound Labor Pilot - Labor Plan / Pick Ahead By Zone / Daily Totals (API)
 // @namespace    http://tampermonkey.net/
-// @version      1.30
+// @version      1.33
 // @description  Intercepts HoudiniPickCapacity API. Two tabs: Full Day Totals (all days with sold units) + Pick Ahead By Zone. Shift window now INCLUDES the anchor CPT (nights 09:15 / days 19:15); zone is DONE only when its anchor-window remaining is 0. OB Indirect splits BATCH vol (Helm) from PICK vol AUTO-PULLED from Labor Allocation get_active_plans (full 24hr array cached, resolves current hr live, cross-domain via GM storage) with manual override. Batching-done end state. Free-resize panel. Unpicked Summary shows picked + remaining cap + pick-ahead flag (Days>2 / Nights>3). Minimizable, Nights/Days toggle.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
@@ -282,8 +282,18 @@
         'https://api.prod.na.central-flow.gsf.a2z.com/get_active_plans',
         'https://api.prod.na.central-flow.gsf.a2z.com/v1/pools/HoudiniPickCapacity/get_active_plans'
     ];
+    // DETECTED SITE (v1.31): the true site (fc) comes from the API data's matcher (parts[0],
+    // e.g. 'UNJ2' or 'UMA4'), captured on every ingest. This makes the tool follow WHATEVER site's
+    // Helm data is loaded — so UMA4 (or any site) pulls its OWN labor plan, not UNJ2's. Falls back
+    // to the URL's sites/ segment, then 'UNJ2' only if nothing else is known.
+    let detectedSite = null;
+    function siteCode() {
+        if (detectedSite) return detectedSite;
+        const m = location.href.match(/sites\/([^/?#]+)/);
+        return (m && m[1]) ? m[1] : 'UNJ2';
+    }
     function laborPlanUrl(base) {
-        const site = (location.href.match(/sites\/([^/?#]+)/) || [,'UNJ2'])[1];
+        const site = siteCode();
         const fmt = (dt) => new Intl.DateTimeFormat('en-CA', { timeZone: tzName(), year:'numeric', month:'2-digit', day:'2-digit' }).format(dt);
         const now = Date.now();
         const dates = [0,1,2].map(n => fmt(new Date(now + n*86400000))).join(',');
@@ -433,7 +443,8 @@
     function windowKey(w) {
         const matcher = w && w.input_config && w.input_config.max_capacity && w.input_config.max_capacity.matcher;
         if (!matcher) return null;
-        const parts = matcher.split('.');            // [UNJ2, Weekday, CPT, ms]
+        const parts = matcher.split('.');            // [fc, Weekday, CPT, ms] — parts[0] is the SITE
+        if (parts[0] && /^[A-Z]{3}\d$/.test(parts[0])) detectedSite = parts[0];   // capture the live site (e.g. UNJ2/UMA4)
         const cpt = parts[2] || '';
         const ms = parseInt(parts[3], 10);
         let date = parts[1] || '';                   // fallback: weekday
@@ -474,6 +485,15 @@
                 // multi-day payload), which previously left only the current day visible.
                 // Keying by date|cpt and always taking the newest payload's version keeps ALL
                 // days the panel has ever seen (9/9 + 9/10 + ...), freshest wins per window.
+                // SITE DETECTION (v1.31): the matcher's first segment is the authoritative site
+                // code for THIS data (e.g. 'UMA4.Wednesday.02:15.<ms>'). Capture it so the Labor
+                // Allocation pull + header reflect whatever site's Helm data is actually loaded —
+                // not a hardcoded UNJ2. Updates every payload so switching sites is picked up live.
+                try {
+                    const mt0 = data[0].input_config && data[0].input_config.max_capacity && data[0].input_config.max_capacity.matcher;
+                    const sc = mt0 ? String(mt0).split('.')[0] : null;
+                    if (sc && /^[A-Z0-9]{3,6}$/.test(sc) && sc !== detectedSite) { detectedSite = sc; }
+                } catch (e) {}
                 data.forEach(w => { const k = windowKey(w); if (k) windowStore.set(k, w); });
                 pruneWindowStore();   // SAFEGUARD: bound memory — drop windows outside the visible horizon
                 latestData = [...windowStore.values()];
@@ -839,6 +859,15 @@
         let shiftRows = rows
             .filter(r => !isNaN(r.ms) && r.ms >= wStart && r.ms < effEnd)
             .sort((a, b) => a.ms - b.ms);
+        // DEDUPE BY DATE+CPT (v1.32): a window must appear ONCE. Duplicates (mid-mile dual-delivery
+        // CPTs, or a Days-roll scrape overlapping API rows) otherwise get their zones summed twice —
+        // producing impossible figures like Ambient 227% picked, TOTAL 132%, and a wildly inflated
+        // pick-ahead number (e.g. 121,105). Keep one row per date|cpt (last wins = freshest/scraped).
+        {
+            const seen = new Map();
+            shiftRows.forEach(r => seen.set((r.date || r.day) + '|' + r.cpt, r));
+            shiftRows = [...seen.values()].sort((a, b) => a.ms - b.ms);
+        }
         // REMAINING-ONLY (v28.9): show only windows from NOW forward through the anchor — drop windows
         // whose CPT has already fully passed (they're done/in the past). At 2AM Nights this yields
         // 02:15→09:15, not the passed evening windows. A window is 'passed' when its CPT time is
@@ -1128,7 +1157,7 @@
         panel.style.cssText = `position:fixed;${posCss}z-index:99999;background:${C.bg};color:${C.txt};
             border:1px solid ${C.border};border-radius:8px;box-shadow:0 4px 16px rgba(9,30,66,.25);font-family:"Amazon Ember",Arial;${sizeCss}`;
 
-        const site = (location.href.match(/sites\/([^/]+)/) || [,'UNJ2'])[1];
+        const site = siteCode();
 
         // ---- Header (no title — the tabs label the views) ----
         const stamp = lastUpdated ? new Intl.DateTimeFormat('en-US', { timeZone: tzName(), hour:'2-digit', minute:'2-digit', hour12:false }).format(new Date(lastUpdated)) : '—';
@@ -1180,7 +1209,7 @@
                         tRow('Pick volume', 'WLM / Labor Allocation (STORM), current hour \u2014 sizes pickers, staging, handoff, slam.') +
                         tRow('Batch volume', 'Helm \u2014 sizes batchers.')
                     )}
-                    <div style="margin-top:4px;color:${C.mut};">Planned volume needs a tweak? Click the Pick Volume box to override; \u201cuse plan\u201d reverts it.</div>
+                    <div style="margin-top:4px;color:${C.mut};">Pulled automatically in the background \u2014 you do <b>not</b> need the Labor Allocation page open. Just be logged in on the network.</div><div style="margin-top:3px;color:${C.mut};">Planned volume needs a tweak? Click the Pick Volume box to override; \u201cuse plan\u201d reverts it.</div>
                     ${sec('Nights vs Days')}
                     <div>Use the <b>Nights / Days</b> toggle to switch boards. The panel auto-anchors to the shift in progress. Once a shift picks through its anchor (Days 20:15 / Nights 09:15), it rolls forward to that shift\u2019s next set of windows.</div>
                     ${sec('\u2699\ufe0f Make it your site (Settings)')}
@@ -1194,7 +1223,7 @@
                     <div>\u2022 \ud83d\udd0d zoom \u2014 clear snippets (Original / Larger / Largest)</div>
                     <div style="margin-top:2px;">\u2022 \u2014 minimize to hide the panel</div>
                     <div style="margin-top:2px;">\u2022 Drag the header to move it</div>
-                    <div style="margin-top:2px;">\u2022 Zone dropdown \u2014 isolate one zone or show all</div>
+                    <div style="margin-top:2px;">\u2022 Zone dropdown \u2014 check any zones to show (multi-select); unchecking all restores every zone</div>
                 </div>`;
             }
             // (Settings button moved into the header, left of the magnifier.)
@@ -1315,7 +1344,7 @@
             } else {
                 // ===== SHARED HEADER (Plan + Zone tabs): unpicked total, shift toggle, zone summary =====
                 // ===== then Plan tab appends the Outbound Labor Plan card; Zone tab appends per-zone bars =====
-                const withData = ZONES.filter(z => totals[z].ordered > 0).sort((a, b) => totals[b].ordered - totals[a].ordered);
+                const withData = ZONES.filter(z => totals[z].ordered > 0);   // v1.33: keep FIXED ZONES order (Chilled, Ambient, Frozen, Bigs, Hv Bigs) so Hv Bigs is always last — clean top-4 snip. (was: re-sorted by volume)
                 if (DEBUG) {
                     // Per-window probe: window-total ordered vs zone-classified vs not_dropped.
                     // Reveals whether a window (e.g. 08:15) has units that are unclassified.
@@ -1489,15 +1518,13 @@
                     // Sharper: bold rows, navy highlight on active, crisp dividers, hover affordance.
                     ZONES.forEach(z => {
                         const on = visibleZones.includes(z);
-                        const solo = on && visibleZones.length === 1;   // this zone is the only one shown
-                        // HIGH CONTRAST: dark text on light rows always; ONLY the solo (isolated) zone gets the
-                        // navy fill + white text. Selected-but-not-solo zones stay dark text with a light tint + check.
-                        const txtColor = solo ? '#fff' : C.txt;
-                        const bg = solo ? C.head : (on ? '#e4f4ea' : '#f4f5f7');
+                        // MULTI-SELECT (v1.31): every SELECTED zone shows checked + light-green tint;
+                        // unselected rows are neutral grey. No single-isolate highlight anymore.
+                        const bg = on ? '#e4f4ea' : '#f4f5f7';
                         h += `<div data-zone="${z}" style="display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:${on ? '700' : '600'};
-                            color:${txtColor};background:${bg};
-                            padding:8px 11px;cursor:pointer;border-radius:5px;margin-bottom:3px;border:1px solid ${solo ? C.head : C.border};transition:background .1s;">
-                            <span>${z}</span><span style="font-size:11px;font-weight:bold;color:${solo ? '#fff' : (on ? C.green : C.mut)};">${on ? (solo ? 'showing' : '✓') : ''}</span></div>`;
+                            color:${C.txt};background:${bg};
+                            padding:8px 11px;cursor:pointer;border-radius:5px;margin-bottom:3px;border:1px solid ${on ? C.green : C.border};transition:background .1s;">
+                            <span>${z}</span><span style="font-size:12px;font-weight:bold;color:${on ? C.green : C.mut};">${on ? '\u2713' : ''}</span></div>`;
                     });
                     h += `</div>`;
                 }
@@ -1586,10 +1613,17 @@
                 if (ztog && panel.contains(ztog)) { visibleZones = (visibleZones.length === ZONES.length) ? [] : ZONES.slice(); zoneMenuOpen = false; saveVisibleZones(); render(); return; }
                 const zrow = e.target.closest('[data-zone]');
                 if (zrow && panel.contains(zrow)) {
+                    // MULTI-SELECT (v1.31): click TOGGLES a zone in/out so you can view several at once.
+                    // Keep the dropdown OPEN so you can check multiple zones in one go. Never allow zero
+                    // (un-checking the last one restores all). Order follows ZONES for stable display.
                     const z = zrow.getAttribute('data-zone');
-                    const solo = visibleZones.length === 1 && visibleZones[0] === z;
-                    visibleZones = solo ? ZONES.slice() : [z];
-                    zoneMenuOpen = false; saveVisibleZones(); render(); return;
+                    if (visibleZones.includes(z)) {
+                        const next = visibleZones.filter(v => v !== z);
+                        visibleZones = next.length ? next : ZONES.slice();   // never empty
+                    } else {
+                        visibleZones = ZONES.filter(v => visibleZones.includes(v) || v === z);   // add, keep ZONES order
+                    }
+                    saveVisibleZones(); render(); return;   // dropdown stays open for multi-pick
                 }
             });
             // Delegated INPUT listener for the manual pick-volume field. Persist on each keystroke
