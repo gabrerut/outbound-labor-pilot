@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Outbound Labor Pilot - Labor Plan / Pick Ahead By Zone / Daily Totals (API)
 // @namespace    http://tampermonkey.net/
-// @version      1.34
+// @version      1.40
 // @description  Intercepts HoudiniPickCapacity API. Two tabs: Full Day Totals (all days with sold units) + Pick Ahead By Zone. Shift window now INCLUDES the anchor CPT (nights 09:15 / days 19:15); zone is DONE only when its anchor-window remaining is 0. OB Indirect splits BATCH vol (Helm) from PICK vol AUTO-PULLED from Labor Allocation get_active_plans (full 24hr array cached, resolves current hr live, cross-domain via GM storage) with manual override. Batching-done end state. Free-resize panel. Unpicked Summary shows picked + remaining cap + pick-ahead flag (Days>2 / Nights>3). Minimizable, Nights/Days toggle.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
@@ -109,6 +109,21 @@
         if (passed.length) return passed[0];                 // most recently passed deadline
         // none passed yet -> the soonest upcoming (about to start)
         return eligible.slice().sort((a, b) => a.deadline - b.deadline)[0];
+    }
+    // ACTIVE-BATCHING CHECK (v1.35): are we CURRENTLY within batching hours? Batching runs from the
+    // FIRST batch window's start (its deadline) through the LAST batch window's deadline. Outside that
+    // range we are NOT batching, so the Batchers plan must be 0 hours (no allocation). Returns true only
+    // when at least one batch deadline has passed AND the last batch deadline hasn't yet passed.
+    function isBatching(rows) {
+        const now = Date.now();
+        const eligible = rows.filter(r => typeof r.deadline === 'number' && !isNaN(r.hr));
+        if (!eligible.length) return false;
+        const started = eligible.some(r => r.deadline <= now);   // some batch window has begun
+        if (!started) return false;                              // before batching starts -> not batching
+        const lastCpt = SETTINGS.obind.lastBatchCpt;
+        const lastWins = eligible.filter(r => r.cpt === lastCpt).sort((a, b) => b.deadline - a.deadline);
+        if (lastWins.length && lastWins[0].deadline <= now) return false;   // last batch done -> not batching
+        return true;
     }
     // TRUE when the LAST batch CPT's deadline has already passed AND there are no
     // upcoming batch deadlines left -> batching is complete for the shift.
@@ -697,9 +712,10 @@
     //  Produces row objects shaped like parseWindows() output so the roll + render reuse them.
     // ============================================================
     function autoExpandTableRows() {
-        try {
-            document.querySelectorAll('.ant-table-row-expand-icon-collapsed, [aria-label="Expand row"]').forEach(ic => { try { ic.click(); } catch (e) {} });
-        } catch (e) {}
+        // DISABLED (v1.40): auto-clicking Helm's expand icons was mutating the user's own Helm view
+        // ('doing something weird to my Helm'). The scraper now reads only rows the user has already
+        // expanded; the roll relies on API data (dedupe prefers API), so force-expanding is unnecessary.
+        // No-op — do NOT programmatically click the page's expand icons.
     }
     // ET-noon epoch-ms for a 'YYYY-MM-DD' + 'HH:15' CPT (so ms sorts correctly; hour from CPT).
     function cptMs(dateStr, cpt) {
@@ -833,7 +849,20 @@
                 a + ZONES.reduce((b, z) => b + r.zones[z].o, 0), 0);
             const anchorUnpicked = anchorRows.reduce((a, r) =>
                 a + ZONES.reduce((b, z) => b + Math.max(r.zones[z].o - r.zones[z].p, 0), 0), 0);
-            if (anchorVolume > 0 && anchorUnpicked === 0) {
+            // ROLL RULE (v1.39) — two ways the Nights board rolls to the NEXT shift's windows:
+            //   (1) ANCHOR PICKED: the 09:15 window is fully picked (0 unpicked) -> shift complete, roll now.
+            //   (2) TIME-BASED GLITCH ROLL: it's > 1hr past the 09:15 anchor (i.e. >= 10:15 site time) AND
+            //       the WHOLE shift is <=5% unpicked -> lingering units are a glitch, roll automatically.
+            //       If MORE than 5% of the shift volume is still unpicked, it's REAL work -> do NOT roll.
+            const shiftVol = ownRows.reduce((a, r) => a + ZONES.reduce((b, z) => b + r.zones[z].o, 0), 0);
+            const shiftUnp = ownRows.reduce((a, r) => a + ZONES.reduce((b, z) => b + Math.max(r.zones[z].o - r.zones[z].p, 0), 0), 0);
+            const shiftPctUnp = shiftVol > 0 ? (shiftUnp / shiftVol) : 0;
+            const nowHr = etHourNow();
+            const anchorH = anchorHour('nights');                 // 9
+            const pastAnchorPlus1 = (nowHr >= (anchorH + 1) && nowHr < startHour('nights'));  // 10:00..18:59 site time
+            const anchorPicked = anchorVolume > 0 && anchorUnpicked === 0;
+            const glitchRoll = pastAnchorPlus1 && shiftPctUnp <= 0.05;   // >1hr past 09:15 & only glitch-level left
+            if (anchorPicked || glitchRoll) {
                 const nd = scrapeNextDayZoneRows();
                 // Next Nights shift SOS = the evening AFTER this shift's SOS date. This shift's SOS is
                 // etDate(wStart) (the 19:15 date). Next SOS = +1 day; window = SOS 19:00 -> SOS+1 09:16.
@@ -859,13 +888,20 @@
         let shiftRows = rows
             .filter(r => !isNaN(r.ms) && r.ms >= wStart && r.ms < effEnd)
             .sort((a, b) => a.ms - b.ms);
-        // DEDUPE BY DATE+CPT (v1.32): a window must appear ONCE. Duplicates (mid-mile dual-delivery
-        // CPTs, or a Days-roll scrape overlapping API rows) otherwise get their zones summed twice —
-        // producing impossible figures like Ambient 227% picked, TOTAL 132%, and a wildly inflated
-        // pick-ahead number (e.g. 121,105). Keep one row per date|cpt (last wins = freshest/scraped).
+        // DEDUPE BY DATE+CPT (v1.32, fixed v1.40): a window must appear ONCE. Duplicates otherwise
+        // double-count (Ambient 227%, TOTAL 132%, inflated pick-ahead). CRITICAL FIX (v1.40): PREFER
+        // the API row over a DOM-SCRAPED row for the same date|cpt. The scraped next-day rows carry
+        // DAYTIME (Days-shift) volume; if a scraped 09:15 overwrote the real API 09:15, the Nights
+        // total absorbed daytime windows (the phantom ~45K). Never let a _scraped row replace an API row.
         {
             const seen = new Map();
-            shiftRows.forEach(r => seen.set((r.date || r.day) + '|' + r.cpt, r));
+            shiftRows.forEach(r => {
+                const k = (r.date || r.day) + '|' + r.cpt;
+                const prev = seen.get(k);
+                // keep existing API row over an incoming scraped one; otherwise last wins
+                if (prev && prev._scraped !== true && r._scraped === true) return;
+                seen.set(k, r);
+            });
             shiftRows = [...seen.values()].sort((a, b) => a.ms - b.ms);
         }
         // REMAINING-ONLY (v28.9): show only windows from NOW forward through the anchor — drop windows
@@ -945,9 +981,12 @@
         // position (index) is more than PICK_AHEAD_LIMIT beyond it AND already has picks
         // means work is happening too far ahead. Flag those windows + the zone header.
         let zoneAheadFlag = false;
+        // 50% RULE (v1.34): only flag a window as 'picked ahead' if it sits PAST the halfway point
+        // of this zone's remaining windows — a little pick-ahead is normal (heavier bags / balanced lists).
+        const zHalfMark = Math.ceil(allRows.length / 2);
         allRows.forEach((w, idx) => {
             const p = w.zones[name];
-            w.__ahead = (idx > PICK_AHEAD_LIMIT && p.p > 0);
+            w.__ahead = (idx >= zHalfMark && p.p > 0);   // past the 50% mark of remaining windows
             if (w.__ahead) zoneAheadFlag = true;
         });
 
@@ -1006,7 +1045,7 @@
             footY += 20;
         }
         if (zoneAheadFlag) {
-            s += `<text x="12" y="${footY + 12}" font-size="12" fill="${C.amber}" font-weight="bold">\u26a0 picking ahead &gt;${PICK_AHEAD_LIMIT} windows</text>`;
+            s += `<text x="12" y="${footY + 12}" font-size="12" fill="${C.amber}" font-weight="bold">\u26a0 heavy pick-ahead</text>`;
             footY += 20;
         }
         if (anchorNote) {
@@ -1030,7 +1069,9 @@
         // BATCH volume (Helm API) drives Batchers only. PICK volume is MANUAL (from the Labor
         // Allocation page, current hour) and drives Pickers/Stage/Handoff/Slam. When 02:15 is
         // being batched, that batch-ahead volume is NOT the current pick volume — keep them split.
-        const batchVol = cur ? Math.max(cur.batchVol || 0, 0) : 0;
+        // NON-BATCHING HOURS (v1.35): outside the active batch window, allocate 0 batcher hours.
+        const batching = isBatching(rows);
+        const batchVol = (batching && cur) ? Math.max(cur.batchVol || 0, 0) : 0;
         const pickVol  = Math.max(effectivePickVol() || 0, 0);
         const batchPlan = obindPlan(batchVol);
         const pickPlan  = obindPlan(pickVol);
@@ -1064,7 +1105,7 @@
             <span style="font-size:10px;font-weight:bold;color:${C.txt};text-transform:uppercase;letter-spacing:.6px;">${name}</span>
             <span style="font-size:11px;color:${C.mut};">${ctx}</span></div>`;
         // ---- BATCHING: from Helm batch-ahead window ----
-        const batchCtx = cur ? `${cur.cpt} \u00b7 vol ${batchVol.toLocaleString()}` : 'no batch window yet';
+        const batchCtx = batching && cur ? `${cur.cpt} \u00b7 vol ${batchVol.toLocaleString()}` : 'not batching this hour \u2014 0 hrs';
         card += sectionBand('Batching', batchCtx);
         card += fmtRow('Batchers', batchPlan.batching, obDiv('batching'), 'batch vol');
         // ---- PICKING: from manual pick volume ----
@@ -1431,7 +1472,10 @@
                     // if none is due yet, anchor to the shift's earliest window. Flag = units picked in
                     // windows more than AHEAD_LIMIT real CPTs beyond the anchor. Days=3 (dense CPTs, constant
                     // batching, no gaps). Nights=3 (gap-aware — the real-CPT sequence skips the 22:15->02:15 gap).
-                    const AHEAD_LIMIT = currentShift === 'days' ? 2 : 3;   // Days=2 (dense, no gaps), Nights=3 (gap-aware)
+                    // 50% RULE (v1.34): picking a few windows ahead is NORMAL — we pull heavier-volume
+                    // bags to build balanced lists. So we ONLY flag when picks land in windows PAST THE
+                    // HALFWAY point of the remaining window sequence (i.e. >50% of the windows ahead of
+                    // the current one). This replaces the old fixed 2/3-window limit for both shifts.
                     const nowMs = Date.now();
                     // Distinct windows by CPT (mid-mile dedupe), chronological. Aggregate ordered/picked per CPT.
                     const byCpt = new Map();
@@ -1447,9 +1491,13 @@
                     let anchorIdx = seq.findIndex(w => (w.ordered - w.picked) > 0 && w.ms <= nowMs);
                     if (anchorIdx < 0) anchorIdx = seq.findIndex(w => (w.ordered - w.picked) > 0);
                     if (anchorIdx < 0) anchorIdx = 0;
-                    // Excess pick-ahead = picks in windows more than AHEAD_LIMIT real CPTs past the anchor.
+                    // Excess pick-ahead = picks in windows PAST the 50% mark of the remaining sequence.
+                    // remaining windows = anchorIdx..end; halfway = anchorIdx + ceil(count/2). Flag picks
+                    // in windows AT OR BEYOND that midpoint. (Fewer than 2 remaining windows -> never flags.)
+                    const remainingCount = seq.length - anchorIdx;
+                    const halfMark = anchorIdx + Math.ceil(remainingCount / 2);
                     let aheadUnits = 0, aheadWins = [];
-                    for (let k = anchorIdx + AHEAD_LIMIT + 1; k < seq.length; k++) {
+                    for (let k = halfMark; k < seq.length; k++) {
                         if (seq[k].picked > 0) { aheadUnits += seq[k].picked; aheadWins.push(seq[k].cpt); }
                     }
                     const pickAhead = aheadUnits > 0;
@@ -1457,7 +1505,7 @@
                     let card = `<div style="border:1px solid ${C.border};border-radius:0 0 6px 6px;border-top:none;margin-bottom:10px;overflow:hidden;">`;
                     // PICK-AHEAD banner (only when it fires)
                     if (pickAhead) {
-                        card += `<div style="background:#fff4e5;border-bottom:1px solid #e0a030;color:#8a5200;font-size:11px;font-weight:bold;padding:6px 10px;">⚠ ${aheadUnits.toLocaleString()} units are picked ${AHEAD_LIMIT}+ CPT windows ahead (${aheadWins.slice(0,3).join(', ')}${aheadWins.length>3?'…':''}). Consider an Inbound labor move.</div>`;
+                        card += `<div style="background:#fff4e5;border-bottom:1px solid #e0a030;color:#8a5200;font-size:11px;font-weight:bold;padding:6px 10px;">⚠ Heavy pick-ahead: ${aheadUnits.toLocaleString()} units past the shift midpoint (${aheadWins.slice(0,3).join(', ')}${aheadWins.length>3?'…':''}). Consider flexing to Inbound.</div>`;
                     }
                     // Zone rows styled like the Outbound Labor Plan card: label + tiny context sub-line
                     // on the left, BIG right-aligned Unpicked number (red if remaining, green if clear). v29.35
@@ -1481,7 +1529,7 @@
                     // EXCESS PICK-AHEAD figure — separate from total picked (which stays whole). Only when > 0.
                     if (aheadUnits > 0) {
                         card += `<div style="display:flex;justify-content:space-between;font-size:11px;font-weight:bold;color:#8a5200;background:#fff4e5;padding:6px 10px;border-top:1px solid #e0a030;">
-                            <span>Picked ${AHEAD_LIMIT}+ CPT windows ahead of the current active CPT</span><span>${aheadUnits.toLocaleString()} ⚠</span></div>`;
+                            <span>Heavy pick-ahead — past shift midpoint</span><span>${aheadUnits.toLocaleString()} ⚠</span></div>`;
                     }
                     card += `</div>`;
                     h += card;
