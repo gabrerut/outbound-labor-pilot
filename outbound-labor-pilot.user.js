@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Outbound Labor Pilot - Labor Plan / Pick Ahead By Zone / Daily Totals (API)
 // @namespace    http://tampermonkey.net/
-// @version      1.41
+// @version      2.0
 // @description  Intercepts HoudiniPickCapacity API. Two tabs: Full Day Totals (all days with sold units) + Pick Ahead By Zone. Shift window now INCLUDES the anchor CPT (nights 09:15 / days 19:15); zone is DONE only when its anchor-window remaining is 0. OB Indirect splits BATCH vol (Helm) from PICK vol AUTO-PULLED from Labor Allocation get_active_plans (full 24hr array cached, resolves current hr live, cross-domain via GM storage) with manual override. Batching-done end state. Free-resize panel. Unpicked Summary shows picked + remaining cap + pick-ahead flag (Days>2 / Nights>3). Minimizable, Nights/Days toggle.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
@@ -861,7 +861,7 @@
             const anchorH = anchorHour('nights');                 // 9
             const pastAnchorPlus1 = (nowHr >= (anchorH + 1) && nowHr < startHour('nights'));  // 10:00..18:59 site time
             const anchorPicked = anchorVolume > 0 && anchorUnpicked === 0;
-            const glitchRoll = pastAnchorPlus1 && shiftPctUnp <= 0.05;   // >1hr past 09:15 & only glitch-level left
+            const glitchRoll = pastAnchorPlus1 && shiftPctUnp <= 0.01;   // >1hr past 09:15 & only glitch-level left (<=1%)
             if (anchorPicked || glitchRoll) {
                 const nd = scrapeNextDayZoneRows();
                 // Next Nights shift SOS = the evening AFTER this shift's SOS date. This shift's SOS is
@@ -874,14 +874,17 @@
                 const ndNights = nd.filter(r =>
                     (r.date === nextSos && r.hr >= nStartH) ||
                     (r.date === nextEnd && r.hr <= nAnchorH));
+                // v1.41 rule: ALWAYS re-anchor the window to the next Nights shift once the roll
+                // fires (anchor picked or glitch-level left). Even if no next-day rows have been
+                // scraped yet, move the shift window forward so the board stops showing the finished
+                // shift. Merge any scraped next-Nights rows in on top.
+                wStart = cptMs(nextSos, '19:00');
+                effEnd = cptMs(nextEnd, '09:16');
+                daysRolled = true;              // reuse the rolled flag for the banner
+                rolledDate = nextSos;
                 if (ndNights.length) {
                     const ndKeys = new Set(ndNights.map(r => (r.date || r.day) + '|' + r.cpt));
                     rows = rows.filter(r => !ndKeys.has((r.date || r.day) + '|' + r.cpt)).concat(ndNights);
-                    const ms0 = Math.min(...ndNights.map(r => r.ms));
-                    const ms1 = Math.max(...ndNights.map(r => r.ms)) + 60000;
-                    wStart = ms0; effEnd = ms1;
-                    daysRolled = true;              // reuse the rolled flag for the banner
-                    rolledDate = nextSos;
                 }
             }
         }
@@ -977,16 +980,25 @@
         // ahead — so the panel never falsely reads DONE with sold windows still to pick.
         const shiftComplete = (allRows.length === 0);
 
-        // Pick-ahead detection: earliest unfinished window is index 0. Any window whose
-        // position (index) is more than PICK_AHEAD_LIMIT beyond it AND already has picks
-        // means work is happening too far ahead. Flag those windows + the zone header.
+        // Pick-ahead detection (v1.43 RUNWAY rule): "ahead" means work is being pulled from a
+        // window that is BEYOND the 3-hour runway from right now, while there is still open work
+        // sitting inside the runway. A window inside the runway is fair game; picking into a window
+        // hours out — while nearer windows are unfinished — is the pattern we flag.
         let zoneAheadFlag = false;
-        // 50% RULE (v1.34): only flag a window as 'picked ahead' if it sits PAST the halfway point
-        // of this zone's remaining windows — a little pick-ahead is normal (heavier bags / balanced lists).
-        const zHalfMark = Math.ceil(allRows.length / 2);
-        allRows.forEach((w, idx) => {
+        const zNow = Date.now();
+        const zRunwayEnd = zNow + 3 * 3600000;   // 3 hours of runway from now
+        // Zone-done: >= 99% of this zone's whole-horizon volume is picked (glitch-level left is done).
+        const zOrdered = windows.reduce((a, w) => a + w.zones[name].o, 0);
+        const zPicked  = windows.reduce((a, w) => a + w.zones[name].p, 0);
+        const zoneDone = zOrdered > 0 && (zPicked / zOrdered) >= 0.99;
+        // Past-glitch: if we're past the anchor CPT by >1hr and only glitch-level remains, don't flag.
+        const zPastGlitchMs = zNow;
+        const zIsPastGlitch = zoneDone;
+        allRows.forEach((w) => {
             const p = w.zones[name];
-            w.__ahead = (idx >= zHalfMark && p.p > 0);   // past the 50% mark of remaining windows
+            // Flag only when: zone isn't essentially done, this window is beyond the runway,
+            // it has open work, AND it's already >=50% picked (real pull-ahead, not a stray unit).
+            w.__ahead = (!zoneDone && w.ms > zRunwayEnd && p.o > 0 && (p.p / p.o) >= 0.50);
             if (w.__ahead) zoneAheadFlag = true;
         });
 
@@ -1476,7 +1488,16 @@
                     // bags to build balanced lists. So we ONLY flag when picks land in windows PAST THE
                     // HALFWAY point of the remaining window sequence (i.e. >50% of the windows ahead of
                     // the current one). This replaces the old fixed 2/3-window limit for both shifts.
+                    // ---- IB LABOR-SHARE PICK-AHEAD (v1.41): a 3-hour RUNWAY rule. ----
+                    // The question this answers: "is Outbound picked far enough ahead that we can
+                    // flex bodies to Inbound?" We split the horizon at NOW + 3h:
+                    //   runway  = distinct CPT windows landing in the next 3 hours,
+                    //   beyond  = windows past the runway.
+                    // We recommend flexing to IB only when the runway is essentially clear (>=99%)
+                    // OR the primaries are well ahead AND real grinding on near work has stopped.
                     const nowMs = Date.now();
+                    const RUNWAY_MS = 3 * 3600000;
+                    const runwayCut = nowMs + RUNWAY_MS;
                     // Distinct windows by CPT (mid-mile dedupe), chronological. Aggregate ordered/picked per CPT.
                     const byCpt = new Map();
                     windows.forEach(w => {
@@ -1487,25 +1508,66 @@
                         ZONES.forEach(z => { e.ordered += w.zones[z].o; e.picked += w.zones[z].p; });
                     });
                     const seq = [...byCpt.values()].sort((a, b) => a.ms - b.ms);   // real CPT sequence, gaps excluded
-                    // Anchor index: earliest unfinished window due by now; else earliest unfinished; else 0.
-                    let anchorIdx = seq.findIndex(w => (w.ordered - w.picked) > 0 && w.ms <= nowMs);
-                    if (anchorIdx < 0) anchorIdx = seq.findIndex(w => (w.ordered - w.picked) > 0);
-                    if (anchorIdx < 0) anchorIdx = 0;
-                    // Excess pick-ahead = picks in windows PAST the 50% mark of the remaining sequence.
-                    // remaining windows = anchorIdx..end; halfway = anchorIdx + ceil(count/2). Flag picks
-                    // in windows AT OR BEYOND that midpoint. (Fewer than 2 remaining windows -> never flags.)
-                    const remainingCount = seq.length - anchorIdx;
-                    const halfMark = anchorIdx + Math.ceil(remainingCount / 2);
-                    let aheadUnits = 0, aheadWins = [];
-                    for (let k = halfMark; k < seq.length; k++) {
-                        if (seq[k].picked > 0) { aheadUnits += seq[k].picked; aheadWins.push(seq[k].cpt); }
+                    const runwayWins  = seq.filter(w => w.ms <= runwayCut);        // due within 3h
+                    const beyondWins  = seq.filter(w => w.ms >  runwayCut);        // further out
+                    const primaryWins = seq.filter(w => w.cpt === ANCHOR_CPT[currentShift]); // shift-end anchor CPT(s)
+
+                    const sumO = arr => arr.reduce((a, w) => a + w.ordered, 0);
+                    const sumP = arr => arr.reduce((a, w) => a + w.picked, 0);
+                    const pct  = (p, o) => o > 0 ? (p / o) : 1;   // empty window counts as clear
+
+                    // Board-level state.
+                    const boardO = sumO(seq), boardP = sumP(seq);
+                    const boardPct = pct(boardP, boardO);
+                    const boardDone = boardPct >= 0.99;                 // whole shift essentially picked
+                    // Past-glitch: only glitch-level (<=1%) of the whole board is left.
+                    const isPastGlitch = boardO > 0 && (1 - boardPct) <= 0.01;
+
+                    // Runway state: is the next 3h of work essentially picked?
+                    const runO = sumO(runwayWins), runP = sumP(runwayWins);
+                    const runwayClear = pct(runP, runO) >= 0.99;
+                    // Beyond-runway: are we at least half into the further-out work?
+                    const beyO = sumO(beyondWins), beyP = sumP(beyondWins);
+                    const beyondHalf = beyO > 0 && pct(beyP, beyO) >= 0.50;
+                    // Primaries (shift-end anchor CPT): how far along?
+                    const primO = sumO(primaryWins), primP = sumP(primaryWins);
+                    const primPct = pct(primP, primO);
+
+                    // Are we still actively grinding near work (open units inside the runway)?
+                    const runwayOpen = Math.max(runO - runP, 0);
+                    const stillGrinding = runwayOpen > 0 && !runwayClear;
+
+                    // Two independent triggers to recommend flexing to IB:
+                    //   G1: the runway is clear (or the whole board is done / past glitch) — nothing
+                    //       urgent left in the next 3h, so spare bodies can go to Inbound.
+                    //   G2: primaries are well ahead (>=99% picked) AND we're >=50% into beyond-runway
+                    //       work — Outbound is running comfortably ahead of the shift-end anchor.
+                    const triggerA = runwayClear || boardDone || isPastGlitch;
+                    const triggerB = (primPct >= 0.99) && beyondHalf;
+                    const G1 = triggerA;
+                    const G2 = triggerB && !stillGrinding;
+                    const pickAhead = (G1 || G2) && boardO > 0;
+
+                    // Excess-units figure for the footer: picked units sitting in beyond-runway windows.
+                    const aheadUnits = beyP;
+                    const aheadWins = beyondWins.filter(w => w.picked > 0).map(w => w.cpt);
+
+                    // Banner copy: say WHY we can flex.
+                    let bMsg = '';
+                    if (pickAhead) {
+                        if (boardDone || isPastGlitch) {
+                            bMsg = `\u2705 Outbound essentially picked (${Math.round(boardPct*100)}%). Runway clear \u2014 flex bodies to Inbound.`;
+                        } else if (runwayClear) {
+                            bMsg = `\u2705 Next 3h picked out \u2014 runway clear. Primaries ${Math.round(primPct*100)}% picked. Spare pickers can flex to Inbound.`;
+                        } else {
+                            bMsg = `\u2705 Primaries ${Math.round(primPct*100)}% picked & running ahead. Consider flexing spare bodies to Inbound.`;
+                        }
                     }
-                    const pickAhead = aheadUnits > 0;
 
                     let card = `<div style="border:1px solid ${C.border};border-radius:0 0 6px 6px;border-top:none;margin-bottom:10px;overflow:hidden;">`;
-                    // PICK-AHEAD banner (only when it fires)
+                    // PICK-AHEAD / IB-flex banner (only when it fires)
                     if (pickAhead) {
-                        card += `<div style="background:#fff4e5;border-bottom:1px solid #e0a030;color:#8a5200;font-size:11px;font-weight:bold;padding:6px 10px;">⚠ Heavy pick-ahead: ${aheadUnits.toLocaleString()} units past the shift midpoint (${aheadWins.slice(0,3).join(', ')}${aheadWins.length>3?'…':''}). Consider flexing to Inbound.</div>`;
+                        card += `<div style="background:#e8f5e9;border-bottom:1px solid #43a047;color:#1b5e20;font-size:11px;font-weight:bold;padding:6px 10px;">${bMsg}</div>`;
                     }
                     // Zone rows styled like the Outbound Labor Plan card: label + tiny context sub-line
                     // on the left, BIG right-aligned Unpicked number (red if remaining, green if clear). v29.35
@@ -1526,10 +1588,11 @@
                     // REMAINING CAP footer
                     card += `<div style="display:flex;justify-content:space-between;font-size:11px;color:${C.mut};padding:6px 10px;border-top:1px solid ${C.border};">
                         <span>Total Remaining Capacity</span><span style="font-weight:bold;color:${C.head};">${totRemCap.toLocaleString()}</span></div>`;
-                    // EXCESS PICK-AHEAD figure — separate from total picked (which stays whole). Only when > 0.
-                    if (aheadUnits > 0) {
-                        card += `<div style="display:flex;justify-content:space-between;font-size:11px;font-weight:bold;color:#8a5200;background:#fff4e5;padding:6px 10px;border-top:1px solid #e0a030;">
-                            <span>Heavy pick-ahead — past shift midpoint</span><span>${aheadUnits.toLocaleString()} ⚠</span></div>`;
+                    // IB LABOR-SHARE footer — picked units already banked in beyond-runway windows.
+                    // Only shows when the flex recommendation is live AND there are banked-ahead units.
+                    if (pickAhead && aheadUnits > 0) {
+                        card += `<div style="display:flex;justify-content:space-between;font-size:11px;font-weight:bold;color:#1b5e20;background:#e8f5e9;padding:6px 10px;border-top:1px solid #43a047;">
+                            <span>Picked ahead beyond 3h runway (\u2192 IB flex)</span><span>${aheadUnits.toLocaleString()} \u2705</span></div>`;
                     }
                     card += `</div>`;
                     h += card;
