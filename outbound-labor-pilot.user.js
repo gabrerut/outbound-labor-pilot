@@ -1433,19 +1433,9 @@
                 const winDiag = winCount + (winCount === 1 ? ' Remaining Window · ' : ' Remaining Windows · ') + firstCpt + '→' + lastCpt;
                 // Title row: shift label + total unpicked sit together (left of the toggle button).
                 // ROW 1: shift label (left) + Nights/Days toggle (right)
-                // v2.1: show BOTH shift dates (SOS -> EOS) for clarity. A Nights shift spans two
-                // calendar days (e.g. 9/25 -> 9/26); Days is same-day. Derive from the window ms range.
-                const dbgAllMs = windows.map(w => w.ms).filter(m => !isNaN(m));
-                const fmtMD = ms => { const d = etDate(ms).split('-'); return parseInt(d[1],10) + '/' + parseInt(d[2],10); };
-                let dateLabel = '';
-                if (dbgAllMs.length) {
-                    const sosMD = fmtMD(Math.min(...dbgAllMs)), eosMD = fmtMD(Math.max(...dbgAllMs));
-                    dateLabel = (sosMD === eosMD) ? sosMD : (sosMD + '\u2192' + eosMD);
-                }
                 h += `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
                     <div>
                         <span style="font-size:16px;font-weight:bold;color:${C.txt};">${currentShift === 'nights' ? 'Nights' : 'Days'}</span>
-                        ${dateLabel ? `<span style="font-size:12px;font-weight:bold;color:${C.head};margin-left:6px;">${dateLabel}</span>` : ''}
                         <span class="mh-tip mh-tip-left" data-tip="${winDiag}" style="font-size:11px;color:${C.mut};margin-left:6px;letter-spacing:.3px;cursor:help;">${SETTINGS.shifts[currentShift].start}\u2192${SETTINGS.shifts[currentShift].anchor}</span>
                     </div>
                     <button id="mh-shift" style="background:${C.head};color:#fff;border:none;border-radius:4px;font-size:11px;padding:3px 11px;cursor:pointer;font-weight:bold;">${currentShift === 'nights' ? 'Nights' : 'Days'}</button>
