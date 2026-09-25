@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @author       gabrerut
 // @copyright    2026, gabrerut (https://github.com/gabrerut/outbound-labor-pilot)
-// @version      2.1
+// @version      2.2
 // @description  Live Outbound planning panel over the Helm Picking Capacity page. Surfaces every CPT at once (Helm only shows ~4 hrs). Three tabs: Daily Totals (ordered/pickable/capacity per day), Pick Ahead By Zone (sold + unpicked per temp zone + pickers needed), and Outbound Labor Plan (pickers per zone direct + Outbound Indirect: batchers, staging, handoff, slam, support). Pick volume auto-pulls from WLM/Labor Allocation (STORM) current hour with manual override; batch volume from Helm. Site auto-detects (defaults UNJ2). Shift-aware Nights/Days toggle; board rolls to the next shift once the anchor CPT is picked. Per-browser Settings (rates/shift windows/indirect). Auto-updates. Minimizable.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
