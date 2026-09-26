@@ -1,3 +1,25 @@
+# Portable Ops Tools (Tampermonkey userscripts)
+
+| Script | Install link (auto-updates) |
+| --- | --- |
+| Outbound Labor Pilot | https://raw.githubusercontent.com/gabrerut/outbound-labor-pilot/main/outbound-labor-pilot.user.js |
+| Engage Coaching Tracker | https://raw.githubusercontent.com/gabrerut/outbound-labor-pilot/main/engage-coaching-tracker.user.js |
+
+Install steps and the auto-update / publishing flow below apply to both scripts.
+The version-bump workflow bumps only the script(s) changed in a push.
+
+## Engage Coaching Tracker
+
+Runs on the QuickSight Elevate dashboard. It scrapes the coaching list, shows
+only associates currently on site (via Find People), and syncs completions and
+"in progress" claims across leaders through Firebase.
+
+- **Before installing:** if you already have an older copy (e.g. v41.45) in
+  Tampermonkey, delete it first, then install from the link above. Old copies
+  have no update URL and will never update themselves.
+- Open Find People once so your site ID is captured (UNJ2 is built in).
+- Keep one QuickSight coaching tab open so the list stays fresh for everyone.
+
 # Outbound Labor Pilot (Tampermonkey userscript)
 
 A Tampermonkey userscript for Helm / Outbound labor planning. It intercepts the
