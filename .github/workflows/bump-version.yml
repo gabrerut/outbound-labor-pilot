@@ -1,15 +1,14 @@
 name: Auto-bump userscript version
 
-# Every push to main that changes a userscript auto-increments that script's
-# @version patch number and commits it back. Tampermonkey checks @updateURL,
-# sees the higher version, and pulls the new file for everyone who installed it.
+# Every push to main that changes the script auto-increments the @version patch
+# number and commits it back. Tampermonkey checks @updateURL, sees the higher
+# version, and pulls the new file for everyone who installed it.
 
 on:
   push:
     branches: [main]
     paths:
       - "outbound-labor-pilot.user.js"
-      - "engage-coaching-tracker.user.js"
 
 # Allow the workflow to push the bump commit back to the repo.
 permissions:
@@ -32,52 +31,39 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Bump @version patch number of changed scripts
+      - name: Bump @version patch number
         id: bump
         run: |
-          SCRIPTS="outbound-labor-pilot.user.js engage-coaching-tracker.user.js"
-          BEFORE="${{ github.event.before }}"
+          FILE="outbound-labor-pilot.user.js"
 
-          # Files changed in this push (fall back to "all scripts" on a new branch).
-          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            CHANGED="$SCRIPTS"
-          else
-            CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}")
+          # Read current version from the @version meta line.
+          CURRENT=$(grep -m1 -oP '@version\s+\K[0-9]+(\.[0-9]+)*' "$FILE")
+          if [ -z "$CURRENT" ]; then
+            echo "Could not find @version in $FILE" >&2
+            exit 1
           fi
+          echo "Current version: $CURRENT"
 
-          SUMMARY=""
-          for FILE in $SCRIPTS; do
-            [ -f "$FILE" ] || continue
-            echo "$CHANGED" | grep -qx "$FILE" || continue
+          # Split into fields and increment the LAST field (patch).
+          IFS='.' read -r -a PARTS <<< "$CURRENT"
+          LAST_IDX=$(( ${#PARTS[@]} - 1 ))
+          PARTS[$LAST_IDX]=$(( ${PARTS[$LAST_IDX]} + 1 ))
+          NEW=$(IFS='.'; echo "${PARTS[*]}")
+          echo "New version: $NEW"
 
-            CURRENT=$(grep -m1 -oP '@version\s+\K[0-9]+(\.[0-9]+)*' "$FILE")
-            if [ -z "$CURRENT" ]; then
-              echo "Could not find @version in $FILE" >&2
-              exit 1
-            fi
+          # Replace only the @version line.
+          sed -i -E "s|(@version\s+).*|\1$NEW|" "$FILE"
 
-            # Increment the LAST field (patch).
-            IFS='.' read -r -a PARTS <<< "$CURRENT"
-            LAST_IDX=$(( ${#PARTS[@]} - 1 ))
-            PARTS[$LAST_IDX]=$(( ${PARTS[$LAST_IDX]} + 1 ))
-            NEW=$(IFS='.'; echo "${PARTS[*]}")
-            echo "$FILE: $CURRENT -> $NEW"
-
-            # Replace only the first @version meta line.
-            sed -i -E "0,/(\/\/ @version\s+).*/s//\1$NEW/" "$FILE"
-            git add "$FILE"
-            SUMMARY="$SUMMARY ${FILE%%.user.js} $NEW"
-          done
-
-          echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+          echo "new_version=$NEW" >> "$GITHUB_OUTPUT"
 
       - name: Commit and push bump
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add outbound-labor-pilot.user.js
           if git diff --cached --quiet; then
             echo "No version change to commit."
             exit 0
           fi
-          git commit -m "chore: bump version${{ steps.bump.outputs.summary }} [skip ci]"
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.new_version }} [skip ci]"
           git push
