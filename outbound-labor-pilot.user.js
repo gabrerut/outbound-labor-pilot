@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @author       gabrerut
 // @copyright    2026, gabrerut
-// @version      2.51
+// @version      2.2
 // @description  Live Outbound planning panel over the Helm Picking Capacity page. Surfaces every CPT at once (Helm only shows ~4 hrs). Three tabs: Daily Totals (ordered/pickable/capacity per day), Pick Ahead By Zone (sold + unpicked per temp zone + pickers needed), and Outbound Labor Plan (pickers per zone direct + Outbound Indirect: batchers, staging, handoff, slam, support). Pick volume auto-pulls from WLM/Labor Allocation (STORM) current hour with manual override; batch volume from Helm. Site auto-detects (defaults UNJ2). Shift-aware Nights/Days toggle; board rolls to the next shift once the anchor CPT is picked. Per-browser Settings (rates/shift windows/indirect). Auto-updates. Minimizable.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
@@ -868,11 +868,11 @@
                 a + ZONES.reduce((b, z) => b + r.zones[z].o, 0), 0);
             const anchorUnpicked = anchorRows.reduce((a, r) =>
                 a + ZONES.reduce((b, z) => b + Math.max(r.zones[z].o - r.zones[z].p, 0), 0), 0);
-            // ROLL RULE (v1.39) — two ways the Nights board rolls to the NEXT shift's windows:
+            // ROLL RULE (v2.0, orig v1.39) — two ways the Nights board rolls to the NEXT shift's windows:
             //   (1) ANCHOR PICKED: the 09:15 window is fully picked (0 unpicked) -> shift complete, roll now.
             //   (2) TIME-BASED GLITCH ROLL: it's > 1hr past the 09:15 anchor (i.e. >= 10:15 site time) AND
-            //       the WHOLE shift is <=5% unpicked -> lingering units are a glitch, roll automatically.
-            //       If MORE than 5% of the shift volume is still unpicked, it's REAL work -> do NOT roll.
+            //       the WHOLE shift is <=1% unpicked -> lingering units are a glitch, roll automatically.
+            //       If MORE than 1% of the shift volume is still unpicked, it's REAL work -> do NOT roll.
             const shiftVol = ownRows.reduce((a, r) => a + ZONES.reduce((b, z) => b + r.zones[z].o, 0), 0);
             const shiftUnp = ownRows.reduce((a, r) => a + ZONES.reduce((b, z) => b + Math.max(r.zones[z].o - r.zones[z].p, 0), 0), 0);
             const shiftPctUnp = shiftVol > 0 ? (shiftUnp / shiftVol) : 0;
@@ -880,7 +880,7 @@
             const anchorH = anchorHour('nights');                 // 9
             const pastAnchorPlus1 = (nowHr >= (anchorH + 1) && nowHr < startHour('nights'));  // 10:00..18:59 site time
             const anchorPicked = anchorVolume > 0 && anchorUnpicked === 0;
-            const glitchRoll = pastAnchorPlus1 && shiftPctUnp <= 0.01;   // >1hr past 09:15 & only glitch-level left (<=1%)
+            const glitchRoll = pastAnchorPlus1 && shiftPctUnp <= 0.01;   // >1hr past 09:15 & <=1% left (99% rule) = glitch
             if (anchorPicked || glitchRoll) {
                 const nd = scrapeNextDayZoneRows();
                 // Next Nights shift SOS = the evening AFTER this shift's SOS date. This shift's SOS is
@@ -893,12 +893,14 @@
                 const ndNights = nd.filter(r =>
                     (r.date === nextSos && r.hr >= nStartH) ||
                     (r.date === nextEnd && r.hr <= nAnchorH));
-                // v1.41 rule: ALWAYS re-anchor the window to the next Nights shift once the roll
-                // fires (anchor picked or glitch-level left). Even if no next-day rows have been
-                // scraped yet, move the shift window forward so the board stops showing the finished
-                // shift. Merge any scraped next-Nights rows in on top.
+                // RE-SCOPE THE WINDOW to tonight's Nights ALWAYS (v1.41): the operational expectation is
+                // that once the prior shift is picked through 09:15, the tool points at TONIGHT's Nights
+                // board (nextSos 19:15 -> nextEnd 09:15) EVEN IF those CPTs aren't sold/populated yet.
+                // Previously the roll only fired when ndNights.length > 0, so a finished 09:15 at 9AM (with
+                // no evening windows sold yet) kept showing the completed prior board. Now we always
+                // re-anchor to tonight's date range; if scraped windows exist we merge them in.
                 wStart = cptMs(nextSos, '19:00');
-                effEnd = cptMs(nextEnd, '09:16');
+                effEnd  = cptMs(nextEnd, '09:16');
                 daysRolled = true;              // reuse the rolled flag for the banner
                 rolledDate = nextSos;
                 if (ndNights.length) {
@@ -934,7 +936,13 @@
         {
             const nowMs2 = Date.now();
             shiftRows = shiftRows.filter(r => {
-                const unp = ZONES.reduce((a, z) => a + Math.max(r.zones[z].o - r.zones[z].p, 0), 0);
+                // v2.1 FIX: count FULL window unpicked (dayOrdered/dayPicked incl not_dropped), NOT
+                // zone-only. On a forming board most volume is unclassified (not_dropped); a zone-only
+                // check saw unp=0 and DROPPED windows that actually had thousands of unpicked units —
+                // that's why 'not all Days windows show'. Use the full total so no real work is hidden.
+                const wo = (typeof r.dayOrdered === 'number') ? r.dayOrdered : ZONES.reduce((a,z)=>a+r.zones[z].o,0);
+                const wp = (typeof r.dayPicked  === 'number') ? r.dayPicked  : ZONES.reduce((a,z)=>a+r.zones[z].p,0);
+                const unp = Math.max(wo - wp, 0);
                 if (unp > 0) return true;                       // real remaining work -> always show
                 return r.ms >= (nowMs2 - 3600000);              // else only current/upcoming windows
             });
@@ -945,7 +953,10 @@
         const sosCpt = SETTINGS.shifts[currentShift].start;
         shiftRows = shiftRows.filter(r => {
             if (r.cpt !== sosCpt) return true;
-            const unp = ZONES.reduce((a, z) => a + Math.max(r.zones[z].o - r.zones[z].p, 0), 0);
+            // v2.1 FIX: full unpicked (incl not_dropped), same reason as the remaining-only filter.
+            const wo = (typeof r.dayOrdered === 'number') ? r.dayOrdered : ZONES.reduce((a,z)=>a+r.zones[z].o,0);
+            const wp = (typeof r.dayPicked  === 'number') ? r.dayPicked  : ZONES.reduce((a,z)=>a+r.zones[z].p,0);
+            const unp = Math.max(wo - wp, 0);
             if (unp <= 0) return false;         // fully picked SOS handoff -> hide
             r.__handoff = true;                 // unpicked remains -> keep + label
             return true;
@@ -999,6 +1010,9 @@
         // ahead — so the panel never falsely reads DONE with sold windows still to pick.
         const shiftComplete = (allRows.length === 0);
 
+        // Pick-ahead detection: earliest unfinished window is index 0. Any window whose
+        // position (index) is more than PICK_AHEAD_LIMIT beyond it AND already has picks
+        // means work is happening too far ahead. Flag those windows + the zone header.
         let zoneAheadFlag = false;
         // PICK-AHEAD RULE (v1.41) — mirror the summary rule at the zone level: a window is only
         // 'picked ahead' if it is BEYOND the 3-hr runway (ms > now+3h) AND is >=50% picked in this zone.
@@ -1278,7 +1292,7 @@
                     ${sec('The three tabs')}
                     <div>\u2022 <b>Daily Totals</b> \u2014 units ordered / pickable / max capacity per day.</div>
                     <div style="margin-top:4px;">\u2022 <b>Pick Ahead By Zone</b> \u2014 units sold + unpicked per temp zone (Chilled, Ambient, Frozen, Bigs, Hv Bigs) and pickers needed per zone, for balanced staffing and clean handoff. Tap the big <b>UNPICKED</b> number for the zone summary.</div>
-                    <div style="margin-top:4px;">\u2022 <b>Outbound Labor Plan</b> \u2014 full hourly plan: pickers per zone (direct) plus the OB Indirect planner (batchers, staging, handoff, slam + support). Tap <b>\ud83d\udce6 OUTBOUND LABOR PLAN</b> to open.</div>
+                    <div style="margin-top:4px;">\u2022 <b>Outbound Labor Plan</b> \u2014 full hourly plan: pickers per zone (direct) plus the Outbound Indirect planner (batchers, staging, handoff, slam + support). Tap <b>\ud83d\udce6 OUTBOUND LABOR PLAN</b> to open.</div>
                     ${sec('Where the numbers come from')}
                     ${tbl(
                         tRow('Pick volume', 'WLM / Labor Allocation (STORM), current hour \u2014 sizes pickers, staging, handoff, slam.') +
@@ -1291,7 +1305,7 @@
                     <div style="margin-bottom:6px;">Nothing is hardcoded \u2014 open the <b>\u2699\ufe0f gear</b> and set your site\u2019s values:</div>
                     ${tbl(
                         tRow('Pack Rate tab', 'Planned UPH per zone + Shift Windows (your Shift Start / Shift End CPTs for Nights &amp; Days).') +
-                        tRow('OB Indirect tab', 'Planning divisors (pick / batch / staging / handoff / slam), support hours, and batch window CPTs.')
+                        tRow('Outbound Indirect tab', 'Planning divisors (pick / batch / staging / handoff / slam), support hours, and batch window CPTs.')
                     )}
                     <div style="margin-top:6px;">Type your values \u2192 <b>Save</b>. Settings save to <i>your</i> browser, so <b>set them once</b>. <b>Reset defaults</b> restores UNJ2. Time zone auto-detects.</div>
                     ${sec('Other controls')}
@@ -1308,7 +1322,7 @@
                 h += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;"><span style="font-size:13px;font-weight:bold;color:${C.txt};">\ud83d\udce6 Outbound Labor Plan</span><button id="mh-set-close" style="background:${C.head};color:#fff;border:none;border-radius:5px;font-size:11px;font-weight:bold;padding:5px 12px;cursor:pointer;">Close</button></div>`;
                 // Sub-tabs: Pack Rate | OB Indirect
                 const setTab = (id,label) => `<button data-settab="${id}" style="flex:1;background:${settingsTab===id?C.head:C.card};color:${settingsTab===id?'#fff':C.txt};border:1px solid ${C.border};font-size:11px;font-weight:bold;padding:5px;cursor:pointer;">${label}</button>`;
-                h += `<div style="display:flex;gap:0;margin-bottom:10px;border-radius:5px;overflow:hidden;">${setTab('rate','Pack Rate')}${setTab('obind','OB Indirect')}</div>`;
+                h += `<div style="display:flex;gap:0;margin-bottom:10px;border-radius:5px;overflow:hidden;">${setTab('rate','Pack Rate')}${setTab('obind','Outbound Indirect')}</div>`;
                 if (settingsTab === 'rate') {
                 // Time zone is AUTO-DETECTED from the browser (no selector needed). Show it read-only.
                 h += `<div style="font-size:10px;color:${C.mut};margin-bottom:10px;">Time zone: <b>${tzName()}</b> <span style="opacity:.7;">(auto-detected)</span></div>`;
@@ -1332,7 +1346,7 @@
                 } // end rate tab
                 if (settingsTab === 'obind') {
                     // OB Indirect divisors
-                    h += `<div style="font-size:11px;font-weight:bold;color:${C.mut};margin-bottom:4px;">OB Indirect Divisors (Vol \u00f7 N)</div>`;
+                    h += `<div style="font-size:11px;font-weight:bold;color:${C.mut};margin-bottom:4px;">Outbound Indirect Divisors (Vol \u00f7 N)</div>`;
                     [['pickers','Pick rate'],['batching','Batch rate'],['stage','Staging'],['handoff','Handoff'],['slam','Slam Standalone']].forEach(([k,label]) => {
                         h += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
                             <span style="font-size:12px;color:${C.txt};">${label}</span>
@@ -1421,24 +1435,39 @@
                 // ===== then Plan tab appends the Outbound Labor Plan card; Zone tab appends per-zone bars =====
                 const withData = ZONES.filter(z => totals[z].ordered > 0);   // v1.33: keep FIXED ZONES order (Chilled, Ambient, Frozen, Bigs, Hv Bigs) so Hv Bigs is always last — clean top-4 snip. (was: re-sorted by volume)
                 if (DEBUG) {
-                    // Per-window probe: window-total ordered vs zone-classified vs not_dropped.
-                    // Reveals whether a window (e.g. 08:15) has units that are unclassified.
+                    // Per-window probe: shows ORDERED and PICKED split three ways per window —
+                    // full window total (dayOrdered/dayPicked), zone-classified, and not_dropped.
+                    // This pinpoints the picked-88 bug: if dayPk > zonePk the picks live in not_dropped.
+                    let dbgDayPk=0,dbgZonePk=0,dbgNdPk=0,dbgDayO=0,dbgZoneO=0,dbgNdO=0;
                     let rowsDbg = windows.map(w => {
                         const zoneO = ZONES.reduce((a, z) => a + w.zones[z].o, 0);
-                        return `${w.cpt}: tot=${(w.dayOrdered||0).toLocaleString()} zone=${zoneO.toLocaleString()} nd=${(w.notDroppedO||0).toLocaleString()}`;
+                        const zoneP = ZONES.reduce((a, z) => a + w.zones[z].p, 0);
+                        const dO = w.dayOrdered||0, dP = w.dayPicked||0, nO = w.notDroppedO||0, nP = w.notDroppedP||0;
+                        dbgDayO+=dO; dbgZoneO+=zoneO; dbgNdO+=nO;
+                        dbgDayPk+=dP; dbgZonePk+=zoneP; dbgNdPk+=nP;
+                        return `${w.cpt}: ORD tot=${dO.toLocaleString()} zone=${zoneO.toLocaleString()} nd=${nO.toLocaleString()} | PICKED tot=${dP.toLocaleString()} zone=${zoneP.toLocaleString()} nd=${nP.toLocaleString()}`;
                     }).join('<br>');
                     h += `<div style="font-size:10px;font-family:monospace;background:#fff8e1;border:1px solid ${C.amber};border-radius:4px;padding:6px;margin-bottom:8px;color:#5b4a00;line-height:1.4;">
-                        <b>DEBUG — in-shift windows (tot / zone-classified / not_dropped):</b><br>${rowsDbg || '(none)'}</div>`;
+                        <b>DEBUG — per-window ORDERED / PICKED (tot / zone / not_dropped):</b><br>${rowsDbg || '(none)'}<br>
+                        <b>TOTALS &rarr; ORD:</b> tot=${dbgDayO.toLocaleString()} zone=${dbgZoneO.toLocaleString()} nd=${dbgNdO.toLocaleString()} &nbsp; <b>PICKED:</b> tot=${dbgDayPk.toLocaleString()} zone=${dbgZonePk.toLocaleString()} nd=${dbgNdPk.toLocaleString()}</div>`;
                 }
                 // Shift-total unpicked = sum of remaining across EVERY in-shift window x zone,
                 // clamped at 0 per window. `windows` is the shiftWindow-filtered set, which for
                 // Nights runs 19:00 -> D+1 09:16, so it INCLUDES the 09:15 anchor CPT (and the
                 // 07:15/08:15 tail). Summing at the window level (not zone-net) guarantees the
                 // 09:15 unpicked units always count, even if earlier windows were over-picked.
+                // v2.1 FIX: the big UNPICKED number must match the REAL Helm board, which counts
+                // FULL window totals (dayOrdered/dayPicked = every units_ordered_*/units_picked_*,
+                // INCLUDING not_dropped). Zone-only sums UNDERCOUNT a forming board where volume is
+                // still unclassified in not_dropped (e.g. tonight's rolled-in Nights windows at 10AM:
+                // 19:15 shows 88 picked in Helm but only Chilled+Ambient are zone-classified). Sum at
+                // the WINDOW level using dayOrdered - dayPicked so future/forming windows count fully.
                 let shiftUnpicked = 0;
-                windows.forEach(w => ZONES.forEach(z => {
-                    shiftUnpicked += Math.max(w.zones[z].o - w.zones[z].p, 0);
-                }));
+                windows.forEach(w => {
+                    const wo = (typeof w.dayOrdered === 'number') ? w.dayOrdered : ZONES.reduce((a,z)=>a+w.zones[z].o,0);
+                    const wp = (typeof w.dayPicked  === 'number') ? w.dayPicked  : ZONES.reduce((a,z)=>a+w.zones[z].p,0);
+                    shiftUnpicked += Math.max(wo - wp, 0);
+                });
                 // DIAG (v28.3): dates + CPT span being totaled — reveals a multi-day over-count.
                 // Sort windows CHRONOLOGICALLY by ms so the range reads true across midnight.
                 const winSorted = windows.filter(w => ZONES.reduce((a,z)=>a+Math.max(w.zones[z].o-w.zones[z].p,0),0) > 0).slice().sort((a,b) => a.ms - b.ms);
@@ -1505,6 +1534,12 @@
                     const totPct = totOrd ? Math.round(totPk/totOrd*100) : 0;
                     const totRemCap = windows.reduce((a, w) => a + (typeof w.remCap === 'number' ? Math.max(w.remCap, 0) : 0), 0);
 
+                    // ---- EXCESS PICK-AHEAD (v26.6): count by REAL CPT WINDOWS AHEAD, not clock hours. ----
+                    // UNJ2 (and every site) has GAPS in the CPT timeline (e.g. no CPTs 22:15->02:15) and
+                    // mid-mile CPTs that repeat. So "N windows ahead" is measured against the sorted list
+                    // of DISTINCT CPTs THAT EXIST in the data — gaps auto-skip, duplicates collapse.
+                    // Anchor = earliest window with unpicked units that is DUE by now (CPT ms <= now);
+                    // if none is due yet, anchor to the shift's earliest window. Flag = units picked in
                     // ============================================================================
                     // PICK-AHEAD / IB LABOR-SHARE FLAG (v1.41) — the FULL RULE (built with Gabby 9/24).
                     // Goal: this is 'outbound planning for dummies' — a FALSE flag that justifies a bad
@@ -1542,7 +1577,7 @@
                     const RUNWAY_MS = 3 * 3600000;   // 3-hour pick-ahead runway
                     const AHEAD_END = nowMs + RUNWAY_MS;
                     // Anchor/EOS ms for this shift = the last window's ms (the anchor CPT).
-                    const shiftEndMs = seq.length ? seq[seq.length - 1].ms : nowMs;   // effEnd is out of scope here; nowMs lands in the 'board done, no flag' state
+                    const shiftEndMs = seq.length ? seq[seq.length - 1].ms : nowMs;   // Kiro fix: effEnd is out of scope here; nowMs lands in the 'board done, no flag' state
                     const hrsToEnd = (shiftEndMs - nowMs) / 3600000;
                     const pctPicked = w => (w.ordered > 0 ? w.picked / w.ordered : 1);   // no volume => treat as done
                     // Runway windows = now .. now+3h ; beyond = > now+3h. (CPT-based, gap-aware.)
@@ -1603,8 +1638,8 @@
                     // PICK-AHEAD / IB LABOR-SHARE banner (only when the full rule fires)
                     if (pickAhead) {
                         const bMsg = triggerA
-                            ? `\u26a0 Runway picked out \u2014 ${aheadUnits.toLocaleString()} units picked beyond the next 3 hrs (${aheadWins.slice(0,3).join(', ')}${aheadWins.length>3?'\u2026':''}). Labor available \u2014 consider flexing to Inbound.`
-                            : `\u26a0 Primaries ${Math.round(primPct*100)}% picked with ${hrsToEnd.toFixed(1)} hr left. Labor available \u2014 consider flexing to Inbound.`;
+                            ? `⚠ Runway picked out — ${aheadUnits.toLocaleString()} units picked beyond the next 3 hrs (${aheadWins.slice(0,3).join(', ')}${aheadWins.length>3?'…':''}). Labor available — consider flexing to Inbound.`
+                            : `⚠ Primaries ${Math.round(primPct*100)}% picked with ${hrsToEnd.toFixed(1)} hr left. Labor available — consider flexing to Inbound.`;
                         card += `<div style="background:#fff4e5;border-bottom:1px solid #e0a030;color:#8a5200;font-size:11px;font-weight:bold;padding:6px 10px;">${bMsg}</div>`;
                     }
                     // Zone rows styled like the Outbound Labor Plan card: label + tiny context sub-line
@@ -1613,23 +1648,23 @@
                     rowsHtml.forEach((r) => {
                         const unpColor = r.unp > 0 ? C.red : C.green;
                         card += `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid ${C.border};font-variant-numeric:tabular-nums;">
-                            <span style="flex:1;min-width:0;line-height:1.2;"><span style="color:${C.txt};font-size:13.5px;font-weight:600;">${r.z}</span>
+                            <span style="line-height:1.2;"><span style="color:${C.txt};font-size:13.5px;font-weight:600;">${r.z}</span>
                                 <span style="display:block;color:${C.mut};font-size:10px;margin-top:0px;">picked ${r.picked.toLocaleString()} \u00b7 ${r.pct}% \u00b7 ${r.pickers} picker${r.pickers===1?'':'s'}</span></span>
                             <span style="font-weight:800;color:${unpColor};font-size:19px;line-height:1;letter-spacing:-.3px;flex:none;min-width:56px;padding-left:10px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;">${r.unp.toLocaleString()}</span></div>`;
                     });
                     card += `</div>`;
                     // TOTAL — prominent navy band with the big unpicked number (matches labor plan total).
                     card += `<div style="display:flex;justify-content:space-between;align-items:center;background:${C.head};color:#fff;padding:8px 12px;font-variant-numeric:tabular-nums;">
-                        <span style="flex:1;min-width:0;line-height:1.2;"><span style="font-size:12.5px;font-weight:bold;letter-spacing:.2px;">TOTAL UNPICKED</span>
+                        <span style="line-height:1.2;"><span style="font-size:12.5px;font-weight:bold;letter-spacing:.2px;">TOTAL UNPICKED</span>
                             <span style="display:block;opacity:.7;font-size:10px;margin-top:1px;">picked ${totPk.toLocaleString()} \u00b7 ${totPct}% \u00b7 ${totPickers} pickers</span></span>
-                        <span style="font-size:22px;font-weight:800;line-height:1;letter-spacing:-.5px;flex:none;min-width:56px;padding-left:12px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;">${totUnp.toLocaleString()}</span></div>`;
+                        <span style="font-size:22px;font-weight:800;line-height:1;letter-spacing:-.5px;flex:none;min-width:56px;padding-left:10px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;">${totUnp.toLocaleString()}</span></div>`;
                     // REMAINING CAP footer
                     card += `<div style="display:flex;justify-content:space-between;font-size:11px;color:${C.mut};padding:6px 10px;border-top:1px solid ${C.border};">
                         <span>Total Remaining Capacity</span><span style="font-weight:bold;color:${C.head};">${totRemCap.toLocaleString()}</span></div>`;
                     // LABOR-SHARE figure — only when the full rule fires (never on a finished board).
                     if (pickAhead) {
                         card += `<div style="display:flex;justify-content:space-between;font-size:11px;font-weight:bold;color:#8a5200;background:#fff4e5;padding:6px 10px;border-top:1px solid #e0a030;">
-                            <span>${triggerA ? 'Picked beyond 3-hr runway' : 'Spare labor \u2014 primaries nearly done'}</span><span>${aheadUnits.toLocaleString()} \u26a0</span></div>`;
+                            <span>${triggerA ? 'Picked beyond 3-hr runway' : 'Spare labor — primaries nearly done'}</span><span>${aheadUnits.toLocaleString()} ⚠</span></div>`;
                     }
                     card += `</div>`;
                     h += card;
@@ -1646,8 +1681,12 @@
                 if (activeTab === 'zone') {
                 // ROLLED banner (v1.22): current shift's board is fully picked -> showing the next shift's windows.
                 if (daysRolled) {
+                    // v2.1: roll banner states exactly what board is shown — no stale prior-day
+                    // reference. e.g. "Showing NIGHTS 2026-09-25 Primary CPTs (19:15→09:15)".
+                    const shLbl = currentShift === 'nights' ? 'Nights' : 'Days';
+                    const rngLbl = `${SETTINGS.shifts[currentShift].start}\u2192${SETTINGS.shifts[currentShift].anchor}`;
                     h += `<div style="background:${C.greenBg};border:1px solid ${C.green};border-radius:5px;padding:7px 10px;margin-bottom:10px;font-size:12px;color:#1c6b3a;font-weight:bold;">
-                        ✓ ${currentShift === 'nights' ? 'Nights 09:15' : 'Days 20:15'} picked — showing NEXT ${currentShift === 'nights' ? 'NIGHTS' : 'DAY'}${rolledDate ? ' ' + rolledDate : ''} board (${SETTINGS.shifts[currentShift].start}→${SETTINGS.shifts[currentShift].anchor})</div>`;
+                        ✓ Showing ${shLbl}${rolledDate ? ' ' + rolledDate : ''} Primary CPTs (${rngLbl})</div>`;
                 }
                 // Zone filter DROPDOWN — collapses to one line; shows only the zones you care about.
                 const selLabel = visibleZones.length === ZONES.length ? 'All zones'
