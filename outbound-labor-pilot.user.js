@@ -2,8 +2,8 @@
 // @name         Outbound Labor Pilot - Labor Plan / Pick Ahead By Zone / Daily Totals (API)
 // @namespace    http://tampermonkey.net/
 // @author       gabrerut
-// @copyright    2026, gabrerut (https://github.com/gabrerut/outbound-labor-pilot)
-// @version      2.5
+// @copyright    2026, gabrerut
+// @version      2.51
 // @description  Live Outbound planning panel over the Helm Picking Capacity page. Surfaces every CPT at once (Helm only shows ~4 hrs). Three tabs: Daily Totals (ordered/pickable/capacity per day), Pick Ahead By Zone (sold + unpicked per temp zone + pickers needed), and Outbound Labor Plan (pickers per zone direct + Outbound Indirect: batchers, staging, handoff, slam, support). Pick volume auto-pulls from WLM/Labor Allocation (STORM) current hour with manual override; batch volume from Helm. Site auto-detects (defaults UNJ2). Shift-aware Nights/Days toggle; board rolls to the next shift once the anchor CPT is picked. Per-browser Settings (rates/shift windows/indirect). Auto-updates. Minimizable.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
@@ -783,9 +783,19 @@
                 });
                 if (!ok) continue;
                 const ms = cptMs(dateTxt, cpt);
+                // v2.1 FIX: the MAIN row's Units Ordered (d+3) / Units Picked (d+4) columns are the FULL
+                // window totals (incl. not_dropped/unclassified) — matching Helm exactly. The zone cells
+                // (wo/wp) only cover the 5 classified zones, so on a forming board they UNDERCOUNT the true
+                // total by the not_dropped volume. Use the main-row totals for dayOrdered/dayPicked so the
+                // rolled board's UNPICKED matches Helm; derive not_dropped as the (full - zone) remainder.
+                const fullO = numFromCell(cells[d+3]);
+                const fullP = numFromCell(cells[d+4]);
+                const dO = (fullO >= wo) ? fullO : wo;   // guard: never below the zone sum
+                const dP = (fullP >= wp) ? fullP : wp;
                 out.push({ day:'', date:dateTxt, ms, cpt, hr: parseInt(cpt,10), zones, remCap:null, deadline:NaN,
-                           batchVol: wo, ordered: wo, picked: wp, notDroppedO:0, notDroppedP:0,
-                           dayOrdered: wo, dayPicked: wp, _scraped:true });
+                           batchVol: dO, ordered: wo, picked: wp,
+                           notDroppedO: Math.max(dO - wo, 0), notDroppedP: Math.max(dP - wp, 0),
+                           dayOrdered: dO, dayPicked: dP, _scraped:true });
             }
         } catch (e) {}
         return out;
@@ -826,19 +836,21 @@
                 const nextDayStr = etDate(cptMs(sosStr, '12:00') + 24*3600000);   // +1 day, ET-safe
                 const dStartH = startHour('days'), dAnchorH = anchorHour('days');
                 const ndDays = nd.filter(r => r.date === nextDayStr && r.hr >= dStartH && r.hr <= dAnchorH);
-                // RE-SCOPE TO NEXT-DAY DAYS ALWAYS (v2.3, mirrors the Nights roll fix): once 20:15 is
+                // RE-SCOPE TO NEXT-DAY DAYS ALWAYS (v2.1, mirrors the Nights roll fix): once 20:15 is
                 // picked, point at TOMORROW's Days board (nextDayStr 07:15 -> 20:15) EVEN IF those CPTs
                 // aren't sold/populated yet. Previously the roll only fired when ndDays.length > 0, so a
-                // finished 20:15 in the evening (tomorrow not sold yet) kept showing today's done board.
-                // Bounds use cptMs (module scope; etAnchor lives inside shiftWindow and is NOT reachable
-                // here) + the safe startHour/anchorHour helpers. cptMs returns HH:15 -> -15min = HH:00;
-                // anchor HH:15 + 1min = HH:16 so the anchor CPT is included.
-                wStart = cptMs(nextDayStr, dStartH + ':00') - 15 * 60000;
-                effEnd = cptMs(nextDayStr, dAnchorH + ':00') + 60000;
+                // finished 20:15 in the evening (with tomorrow not sold yet) kept showing today's done board.
+                // Bounds via cptMs (TOP-LEVEL, in scope here). NOTE: etAnchor is nested inside
+                // shiftWindow and is NOT accessible from this function — calling it crashes the render
+                // ("etAnchor is not defined"). cptMs(date, cpt) resolves ET-correctly. Use the hour-start
+                // for wStart (cptMs lands on :15, so '07:00' -> 07:15) and the anchor CPT +16min for the end.
+                const dStartCpt = ('0'+startHour('days')).slice(-2) + ':00';   // e.g. '07:00'
+                const dAnchorCpt = ('0'+anchorHour('days')).slice(-2) + ':15'; // e.g. '20:15'
+                wStart = cptMs(nextDayStr, dStartCpt);
+                effEnd  = cptMs(nextDayStr, dAnchorCpt) + 16*60000;
                 daysRolled = true;
                 rolledDate = nextDayStr;
                 if (ndDays.length) {
-                    // DEDUPE: scraped next-day rows REPLACE (never double) the API/DOM copies.
                     const ndKeys = new Set(ndDays.map(r => (r.date || r.day) + '|' + r.cpt));
                     rows = rows.filter(r => !ndKeys.has((r.date || r.day) + '|' + r.cpt)).concat(ndDays);
                 }
