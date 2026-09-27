@@ -783,9 +783,18 @@
                 });
                 if (!ok) continue;
                 const ms = cptMs(dateTxt, cpt);
+                // v2.4: the MAIN row's Units Ordered (d+3) / Units Picked (d+4) are the FULL window totals
+                // (incl. not_dropped), matching Helm. Zone cells only cover the 5 classified zones, so on a
+                // forming board they undercount. Use main-row totals for dayOrdered/dayPicked; not_dropped
+                // is the (full - zone) remainder. Guard: never below the zone sum.
+                const fullO = numFromCell(cells[d+3]);
+                const fullP = numFromCell(cells[d+4]);
+                const dO = (fullO >= wo) ? fullO : wo;
+                const dP = (fullP >= wp) ? fullP : wp;
                 out.push({ day:'', date:dateTxt, ms, cpt, hr: parseInt(cpt,10), zones, remCap:null, deadline:NaN,
-                           batchVol: wo, ordered: wo, picked: wp, notDroppedO:0, notDroppedP:0,
-                           dayOrdered: wo, dayPicked: wp, _scraped:true });
+                           batchVol: dO, ordered: wo, picked: wp,
+                           notDroppedO: Math.max(dO - wo, 0), notDroppedP: Math.max(dP - wp, 0),
+                           dayOrdered: dO, dayPicked: dP, _scraped:true });
             }
         } catch (e) {}
         return out;
@@ -815,12 +824,19 @@
         if (currentShift === 'days') {
             const anchorCpt = ANCHOR_CPT.days;   // '20:15'
             const anchorRows = ownRows.filter(r => r.cpt === anchorCpt);
-            const anchorVolume = anchorRows.reduce((a, r) =>
-                a + ZONES.reduce((b, z) => b + r.zones[z].o, 0), 0);
-            const anchorUnpicked = anchorRows.reduce((a, r) =>
-                a + ZONES.reduce((b, z) => b + Math.max(r.zones[z].o - r.zones[z].p, 0), 0), 0);
-            // Roll trigger: 20:15 has sold volume AND is fully picked -> current Days board is complete.
-            if (anchorVolume > 0 && anchorUnpicked === 0) {
+            // v2.4: judge completion on FULL window totals (dayOrdered/dayPicked incl. not_dropped),
+            // not zone-only. A forming 20:15 is mostly unclassified volume, so its small zone slice can
+            // read "fully picked" mid-day and wrongly roll the board to tomorrow (hiding today's work).
+            const fullO = r => (typeof r.dayOrdered === 'number') ? r.dayOrdered : ZONES.reduce((b, z) => b + r.zones[z].o, 0);
+            const fullP = r => (typeof r.dayPicked  === 'number') ? r.dayPicked  : ZONES.reduce((b, z) => b + r.zones[z].p, 0);
+            const anchorVolume   = anchorRows.reduce((a, r) => a + fullO(r), 0);
+            const anchorUnpicked = anchorRows.reduce((a, r) => a + Math.max(fullO(r) - fullP(r), 0), 0);
+            // The whole Days board must also be essentially done (<=1% unpicked, same 99% rule as Nights).
+            const dayVol = ownRows.reduce((a, r) => a + fullO(r), 0);
+            const dayUnp = ownRows.reduce((a, r) => a + Math.max(fullO(r) - fullP(r), 0), 0);
+            const boardDoneDays = dayVol > 0 && (dayUnp / dayVol) <= 0.01;
+            // Roll trigger: 20:15 fully picked AND the whole Days board is done.
+            if (anchorVolume > 0 && anchorUnpicked === 0 && boardDoneDays) {
                 const nd = scrapeNextDayZoneRows();
                 const sosStr = etDate(wStart);
                 const nextDayStr = etDate(cptMs(sosStr, '12:00') + 24*3600000);   // +1 day, ET-safe
