@@ -826,16 +826,21 @@
                 const nextDayStr = etDate(cptMs(sosStr, '12:00') + 24*3600000);   // +1 day, ET-safe
                 const dStartH = startHour('days'), dAnchorH = anchorHour('days');
                 const ndDays = nd.filter(r => r.date === nextDayStr && r.hr >= dStartH && r.hr <= dAnchorH);
+                // RE-SCOPE TO NEXT-DAY DAYS ALWAYS (v2.3, mirrors the Nights roll fix): once 20:15 is
+                // picked, point at TOMORROW's Days board (nextDayStr 07:15 -> 20:15) EVEN IF those CPTs
+                // aren't sold/populated yet. Previously the roll only fired when ndDays.length > 0, so a
+                // finished 20:15 in the evening (tomorrow not sold yet) kept showing today's done board.
+                // Bounds use cptMs (module scope; etAnchor lives inside shiftWindow and is NOT reachable
+                // here) + the safe startHour/anchorHour helpers. cptMs returns HH:15 -> -15min = HH:00;
+                // anchor HH:15 + 1min = HH:16 so the anchor CPT is included.
+                wStart = cptMs(nextDayStr, dStartH + ':00') - 15 * 60000;
+                effEnd = cptMs(nextDayStr, dAnchorH + ':00') + 60000;
+                daysRolled = true;
+                rolledDate = nextDayStr;
                 if (ndDays.length) {
-                    // DEDUPE FIX: drop any existing rows whose date+cpt matches a scraped next-day row
-                    // BEFORE concat, so scraped next-day rows REPLACE (never double) the API/DOM copies.
+                    // DEDUPE: scraped next-day rows REPLACE (never double) the API/DOM copies.
                     const ndKeys = new Set(ndDays.map(r => (r.date || r.day) + '|' + r.cpt));
                     rows = rows.filter(r => !ndKeys.has((r.date || r.day) + '|' + r.cpt)).concat(ndDays);
-                    const ms0 = Math.min(...ndDays.map(r => r.ms));
-                    const ms1 = Math.max(...ndDays.map(r => r.ms)) + 60000;
-                    wStart = ms0; effEnd = ms1;
-                    daysRolled = true;
-                    rolledDate = nextDayStr;
                 }
             }
         }
