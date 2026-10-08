@@ -1014,15 +1014,8 @@
         // position (index) is more than PICK_AHEAD_LIMIT beyond it AND already has picks
         // means work is happening too far ahead. Flag those windows + the zone header.
         let zoneAheadFlag = false;
-        // PICK-AHEAD RULE (v1.41) — mirror the summary rule at the zone level: a window is only
-        // 'picked ahead' if it is BEYOND the 3-hr runway (ms > now+3h) AND is >=50% picked in this zone.
-        // Pulling a few heavy density bags leaves the window well under 50% -> not flagged. And if the
-        // zone has no meaningful unpicked work left anywhere, it's DONE, not ahead -> never flag.
+        // Zone DONE state kept (glitch tolerance + direction guard) for the DONE/row logic.
         const zNow = Date.now();
-        const zRunwayEnd = zNow + 3 * 3600000;
-        // v1.43: zone effectively DONE at >=99% picked (glitch tolerance). Also apply the DIRECTION
-        // GUARD — ignore stragglers in windows we're WELL PAST (>1hr past CPT, <10% of window left):
-        // we've moved on to the next window, so assume those units canceled. Windows not yet passed count.
         const zPastGlitchMs = 60 * 60000;
         const zIsPastGlitch = w => {
             const zp = w.zones[name]; const unp = Math.max(zp.o - zp.p, 0);
@@ -1032,12 +1025,14 @@
         const zoneUnpTotal = allRows.reduce((a, w) => a + (zIsPastGlitch(w) ? 0 : Math.max(w.zones[name].o - w.zones[name].p, 0)), 0);
         const zoneVolTotal = allRows.reduce((a, w) => a + w.zones[name].o, 0);
         const zoneDone = zoneVolTotal > 0 ? ((1 - zoneUnpTotal / zoneVolTotal) >= 0.99) : true;
+        // Anchor window ms for this shift (last primary). Any window later than it is beyond-primary.
+        const zAnchorW = allRows.filter(w => w.cpt === anchorCpt).sort((a,b)=>a.ms-b.ms).pop();
+        const zAnchorMs = zAnchorW ? zAnchorW.ms : (allRows.length ? allRows[allRows.length-1].ms : zNow);
         allRows.forEach((w) => {
             const p = w.zones[name];
-            w.__ahead = (!zoneDone && w.ms > zRunwayEnd && p.o > 0 && (p.p / p.o) >= 0.50);
+            w.__ahead = (w.ms > zAnchorMs && p.p > 0);   // beyond primary windows AND picked into
             if (w.__ahead) zoneAheadFlag = true;
         });
-
         // Cap the view to the 5 current (earliest) windows; note how many are hidden.
         const rows = allRows.slice(0, MAX_ZONE_WINDOWS);
         const hidden = allRows.length - rows.length;
@@ -1081,7 +1076,7 @@
             if (w.__ahead) s += `<rect x="0" y="${y}" width="${W}" height="${rowH}" fill="${C.amberBg}"/>`;
             else if (isAnchor) s += `<rect x="0" y="${y}" width="${W}" height="${rowH}" fill="#eef2f7"/>`;
             else if (i % 2) s += `<rect x="0" y="${y}" width="${W}" height="${rowH}" fill="#fafbfc"/>`;
-            const rowTip = isAnchor ? '\u2605 Anchor (shift-end) CPT \u2014 must be picked by end of shift' : (w.__ahead ? '\u26a0 Picked ahead of the current active CPT' : w.cpt);
+            const rowTip = isAnchor ? '\u2605 Anchor (shift-end) CPT \u2014 must be picked by end of shift' : (w.__ahead ? '\u26a0 Picked beyond primary windows' : w.cpt);
             s += `<text x="12" y="${y + 19}" font-size="13" fill="${C.txt}" font-family="monospace" font-weight="${isAnchor ? 'bold' : 'normal'}"><title>${rowTip}</title>${w.__ahead ? '\u26a0 ' : ''}${isAnchor ? '\u2605 ' : ''}${w.cpt}${w.__handoff ? ' \u00b7 handoff' : ''}</text>`;
             s += `<rect x="${barX}" y="${y + 7}" width="${barW}" height="14" rx="3" fill="${C.track}"/>`;
             if (fw > 0) s += `<rect x="${barX}" y="${y + 7}" width="${Math.max(fw, 3).toFixed(1)}" height="14" rx="3" fill="${barColor(wpct)}"/>`;
@@ -1093,7 +1088,7 @@
             footY += 20;
         }
         if (zoneAheadFlag) {
-            s += `<text x="12" y="${footY + 12}" font-size="12" fill="${C.amber}" font-weight="bold">\u26a0 heavy pick-ahead</text>`;
+            s += `<text x="12" y="${footY + 12}" font-size="12" fill="${C.amber}" font-weight="bold">\u26a0 Excess Pick-Ahead \u2014 beyond primary windows</text>`;
             footY += 20;
         }
         if (anchorNote) {
@@ -1524,13 +1519,12 @@
                     // number and the Helm columns), which INCLUDES not_dropped / unclassified volume.
                     // Per-zone rows stay classified (that's their purpose), but the TOTAL uses full
                     // window totals (dayOrdered/dayPicked) so a forming board isn't undercounted.
-                    const totOrd = windows.reduce((a, w) => a + ((typeof w.dayOrdered === 'number') ? w.dayOrdered : ZONES.reduce((b,z)=>b+w.zones[z].o,0)), 0);
-                    const totPk  = windows.reduce((a, w) => a + ((typeof w.dayPicked  === 'number') ? w.dayPicked  : ZONES.reduce((b,z)=>b+w.zones[z].p,0)), 0);
-                    const totUnp = windows.reduce((a, w) => {
-                        const wo = (typeof w.dayOrdered === 'number') ? w.dayOrdered : ZONES.reduce((b,z)=>b+w.zones[z].o,0);
-                        const wp = (typeof w.dayPicked  === 'number') ? w.dayPicked  : ZONES.reduce((b,z)=>b+w.zones[z].p,0);
-                        return a + Math.max(wo - wp, 0);
-                    }, 0);
+                    // v2.6 (user model 2026-10-08): TOTAL = ZONE-CLASSIFIED ONLY. not_dropped excluded
+                    // (not assignable). Zone rows therefore sum EXACTLY to the TOTAL — no reconciliation
+                    // ('Unclassified') row needed. not_dropped lives only in the Daily Totals tab.
+                    const totOrd = windows.reduce((a, w) => a + ZONES.reduce((b,z)=>b+w.zones[z].o,0), 0);
+                    const totPk  = windows.reduce((a, w) => a + ZONES.reduce((b,z)=>b+w.zones[z].p,0), 0);
+                    const totUnp = windows.reduce((a, w) => a + ZONES.reduce((b,z)=>b+Math.max(w.zones[z].o - w.zones[z].p, 0),0), 0);
                     const totPct = totOrd ? Math.round(totPk/totOrd*100) : 0;
                     const totRemCap = windows.reduce((a, w) => a + (typeof w.remCap === 'number' ? Math.max(w.remCap, 0) : 0), 0);
 
@@ -1541,36 +1535,20 @@
                     // Anchor = earliest window with unpicked units that is DUE by now (CPT ms <= now);
                     // if none is due yet, anchor to the shift's earliest window. Flag = units picked in
                     // ============================================================================
-                    // PICK-AHEAD / IB LABOR-SHARE FLAG (v1.41) — the FULL RULE (built with Gabby 9/24).
-                    // Goal: this is 'outbound planning for dummies' — a FALSE flag that justifies a bad
-                    // labor move is worse than NO flag. So the flag fires ONLY when there is genuine slack
-                    // to give to Inbound. Two trigger paths, plus HARD guardrails that kill known false flags.
-                    //
-                    // We should be picking ~3 HOURS AHEAD. Anything inside that runway is EXPECTED — never flag.
-                    //
-                    //   TRIGGER A (early/mid shift, over-picking the runway):
-                    //     - the 3-hr-ahead runway (now -> now+3h CPTs) is 100% PICKED, AND
-                    //     - windows BEYOND +3h are >=50% picked  (biting real depth into far-future volume)
-                    //   TRIGGER B (end of shift, primaries essentially done):
-                    //     - <=2 hours left to the shift anchor/EOS, AND
-                    //     - primary windows are >=90% picked            (board basically wrapped -> spare labor)
-                    //
-                    //   HARD GUARDRAILS (either one true -> NEVER flag):
-                    //     G1  fully-picked board: no meaningful unpicked work anywhere -> finished, not ahead.
-                    //     G2  still grinding primaries late: <=2h left AND primaries <90% picked -> own board.
-                    //
-                    // These kill both false flags Gabby called out:
-                    //   * a fully-picked board (all ~100%) -> G1 -> silent
-                    //   * picking 09:15 at 06:15 (within the 3-hr runway) -> not 'beyond +3h' -> silent
+                    // EXCESS PICK-AHEAD (v2.6, FINAL rule 2026-10-07) — picking BEYOND primary windows.
+                    // Flag ONLY when the shift is picking past its own PRIMARY windows (into the NEXT
+                    // shift's windows, after this shift's anchor CPT). The anchor CPT itself
+                    // (Nights 09:15 / Days 20:15) is a PRIMARY window = required work by EOS -> NEVER flags.
+                    // Picking 09:15 at 2AM is NOT pick-ahead (primary window). Picking 10:15/11:15 (Days
+                    // windows) while on Nights IS. Timezone/gap-agnostic: compares each window's CPT ms
+                    // against the shift anchor's ms.
                     // ============================================================================
                     const nowMs = Date.now();
-                    // Distinct windows by CPT (mid-mile dedupe), chronological. Aggregate ordered/picked per CPT.
                     const byCpt = new Map();
                     windows.forEach(w => {
-                        const key = w.cpt;
-                        if (!byCpt.has(key)) byCpt.set(key, { cpt: w.cpt, ms: w.ms, ordered: 0, picked: 0 });
-                        const e = byCpt.get(key);
-                        e.ms = Math.min(e.ms, w.ms);   // earliest ms for this CPT
+                        if (!byCpt.has(w.cpt)) byCpt.set(w.cpt, { cpt: w.cpt, ms: w.ms, ordered: 0, picked: 0 });
+                        const e = byCpt.get(w.cpt);
+                        e.ms = Math.min(e.ms, w.ms);
                         ZONES.forEach(z => { e.ordered += w.zones[z].o; e.picked += w.zones[z].p; });
                     });
                     const seq = [...byCpt.values()].sort((a, b) => a.ms - b.ms);   // real CPT sequence, gaps excluded
@@ -1628,12 +1606,10 @@
                     const pickAhead = !boardDone && !stillGrinding && (triggerA || triggerB);
                     // Units + windows to report: for A, the beyond picks; for B, spare = primaries picked deep.
                     let aheadUnits = 0, aheadWins = [];
-                    if (pickAhead && triggerA) {
-                        beyondWins.forEach(w => { if (w.picked > 0) { aheadUnits += w.picked; aheadWins.push(w.cpt); } });
-                    } else if (pickAhead && triggerB) {
-                        aheadUnits = primPicked; aheadWins = primaryWins.map(w => w.cpt);
-                    }
-
+                    seq.forEach(w => {
+                        if (w.ms > anchorMs && w.picked > 0) { aheadUnits += w.picked; aheadWins.push(w.cpt); }
+                    });
+                    const pickAhead = aheadUnits > 0;
                     let card = `<div style="border:1px solid ${C.border};border-radius:0 0 6px 6px;border-top:none;margin-bottom:10px;overflow:hidden;">`;
                     // PICK-AHEAD / IB LABOR-SHARE banner (only when the full rule fires)
                     if (pickAhead) {
