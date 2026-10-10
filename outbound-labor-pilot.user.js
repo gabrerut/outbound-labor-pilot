@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @author       gabrerut
 // @copyright    2026, gabrerut
-// @version      2.8
+// @version      2.9
 // @description  Live Outbound planning panel over the Helm Picking Capacity page. Surfaces every CPT at once (Helm only shows ~4 hrs). Three tabs: Daily Totals (ordered/pickable/capacity per day), Pick Ahead By Zone (sold + unpicked per temp zone + pickers needed), and Outbound Labor Plan (pickers per zone direct + Outbound Indirect: batchers, staging, handoff, slam, support). Pick volume auto-pulls from WLM/Labor Allocation (STORM) current hour with manual override; batch volume from Helm. Site auto-detects (defaults UNJ2). Shift-aware Nights/Days toggle; board rolls to the next shift once the anchor CPT is picked. Per-browser Settings (rates/shift windows/indirect). Auto-updates. Minimizable.
 // @match        https://helm-iad.iad.proxy.amazon.com/*
 // @match        https://helm-*.amazon.com/*
@@ -929,6 +929,11 @@
             });
             shiftRows = [...seen.values()].sort((a, b) => a.ms - b.ms);
         }
+        // ALL PRIMARY WINDOWS (v2.6): snapshot the full deduped shift window set BEFORE the
+        // remaining-only / SOS filters remove already-passed or fully-picked windows. Used for the
+        // 'Total Remaining Capacity' line, which must reflect capacity across ALL primary CPTs of the
+        // shift (19:15->09:15 / 07:15->20:15), not just the windows still in play.
+        const allPrimary = shiftRows.slice();
         // REMAINING-ONLY (v28.9): show only windows from NOW forward through the anchor — drop windows
         // whose CPT has already fully passed (they're done/in the past). At 2AM Nights this yields
         // 02:15→09:15, not the passed evening windows. A window is 'passed' when its CPT time is
@@ -968,7 +973,7 @@
             totals[z].ordered += r.zones[z].o;
             totals[z].picked  += r.zones[z].p;
         }));
-        return { totals, windows: shiftRows, daysRolled, rolledDate };
+        return { totals, windows: shiftRows, allPrimary, daysRolled, rolledDate };
     }
     // Day ordering: sort chronologically (by calendar date) and include EVERY day that has
     // sold units (ordered > 0). This guarantees 9/10, 9/11, etc. show as soon as they have
@@ -1211,7 +1216,7 @@
 
         const rows = dedupe(parseWindows(latestData));
         const days = dayTotals(rows);
-        const { totals, windows, daysRolled, rolledDate } = zoneAggAndWindows(rows);
+        const { totals, windows, allPrimary, daysRolled, rolledDate } = zoneAggAndWindows(rows);
         // Runway to the primary anchor CPT (Nights 09:15 / Days 20:15) for pickers-needed.
         // Use the anchor window's timestamp within the current shift set; hours = (anchorMs - now)/h.
         const anchorCptGlobal = ANCHOR_CPT[currentShift];
@@ -1530,7 +1535,15 @@
                     const totPk  = windows.reduce((a, w) => a + ZONES.reduce((b,z)=>b+w.zones[z].p,0), 0);
                     const totUnp = windows.reduce((a, w) => a + ZONES.reduce((b,z)=>b+Math.max(w.zones[z].o - w.zones[z].p, 0),0), 0);
                     const totPct = totOrd ? Math.round(totPk/totOrd*100) : 0;
-                    const totRemCap = windows.reduce((a, w) => a + (typeof w.remCap === 'number' ? Math.max(w.remCap, 0) : 0), 0);
+                    // v2.6 (user rule 2026-10-10): Total Remaining Capacity sums remCap ONLY over
+                    // windows that still have UNPICKED units (zone-classified). A fully-picked / sold-out
+                    // window contributes nothing. Base is allPrimary (every primary CPT of the shift), so
+                    // at 11:16 AM with nothing sold out, every window still has unpicked -> all contribute.
+                    const totRemCap = allPrimary.reduce((a, w) => {
+                        const unp = ZONES.reduce((b, z) => b + Math.max(w.zones[z].o - w.zones[z].p, 0), 0);
+                        if (unp <= 0) return a;                                  // sold out / fully picked -> skip
+                        return a + (typeof w.remCap === 'number' ? Math.max(w.remCap, 0) : 0);
+                    }, 0);
 
                     // ============================================================================
                     // EXCESS PICK-AHEAD (v2.6, FINAL rule 2026-10-07) — picking BEYOND primary windows.
