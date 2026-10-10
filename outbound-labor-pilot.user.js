@@ -39,7 +39,6 @@
     };
     const MAX_DAYS = 4; // Daily Totals shows up to 4 days (9/20+9/21+9/22 and headroom). Pick Ahead roll is UNAFFECTED — it stays single-day (9/21 only).
     const MAX_ZONE_WINDOWS = 5;  // Pick Ahead By Zone: show at most 5 current windows per zone
-    const PICK_AHEAD_LIMIT  = 3; // flag picks landing more than 3 windows ahead of the earliest unfinished one
     const DEBUG = false;          // show a diagnostic readout of every date/count in the store
     // Shift is 'done' only when its ANCHOR CPT is fully picked: Nights = 09:15, Days = 19:15.
     // ============================================================
@@ -790,9 +789,13 @@
                 // rolled board's UNPICKED matches Helm; derive not_dropped as the (full - zone) remainder.
                 const fullO = numFromCell(cells[d+3]);
                 const fullP = numFromCell(cells[d+4]);
+                // v2.6: scrape the main-row Remaining Capacity (d+8) too, so ROLLED/next-day windows
+                // carry a real remCap instead of null (which summed to 0 and undercounted the
+                // 'Total Remaining Capacity' line on rolled boards). Column map: RemCap(d+8).
+                const scrRemCap = numFromCell(cells[d+8]);
                 const dO = (fullO >= wo) ? fullO : wo;   // guard: never below the zone sum
                 const dP = (fullP >= wp) ? fullP : wp;
-                out.push({ day:'', date:dateTxt, ms, cpt, hr: parseInt(cpt,10), zones, remCap:null, deadline:NaN,
+                out.push({ day:'', date:dateTxt, ms, cpt, hr: parseInt(cpt,10), zones, remCap: (isNaN(scrRemCap) ? null : scrRemCap), deadline:NaN,
                            batchVol: dO, ordered: wo, picked: wp,
                            notDroppedO: Math.max(dO - wo, 0), notDroppedP: Math.max(dP - wp, 0),
                            dayOrdered: dO, dayPicked: dP, _scraped:true });
